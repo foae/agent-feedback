@@ -112,11 +112,15 @@ scripts/deploy.sh            # deploy :latest (most recent main build)
 scripts/deploy.sh <sha>      # deploy a specific CI-built commit
 ```
 
-The script pulls the image from GHCR locally (your `gh` auth; deploy-host holds no
-registry credentials), streams it over SSH (`docker save | docker load`), syncs
+The script fetches the image from GHCR into a tarball with `crane` (your `gh`
+auth; deploy-host holds no registry credentials), streams it over SSH into
+`docker load`, syncs
 `infra/agent-feedback/docker-compose.deploy.yml` to `~/agent-feedback/` on
 deploy-host, generates credentials into `~/agent-feedback/.env` on first deploy
 (preserved on every later deploy), runs `docker compose up -d`, and health-checks.
+Local prerequisites: `gh` (authed), `docker`, `crane` (`brew install crane`) —
+crane is used instead of `docker save` because docker's containerd image store
+can emit truncated save tars (see the script header).
 The API key lives only in that remote `.env`. Typical flow: merge/push to `main`
 → wait for CI to publish the image → run the script.
 
