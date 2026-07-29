@@ -1,0 +1,26 @@
+# Build all services.
+build-all:
+    go build ./...
+
+# Run all tests with race detection.
+test-all:
+    go test -race -v ./...
+
+# Run go vet on everything.
+vet-all:
+    go vet ./...
+
+# Run go fmt on everything.
+fmt-all:
+    go fmt ./...
+
+# Run go mod tidy.
+tidy:
+    go mod tidy
+
+# Run all checks: fmt, vet, tidy, build.
+check-all: fmt-all vet-all tidy build-all
+
+# Clean all build artifacts.
+clean-all:
+    rm -rf bin/

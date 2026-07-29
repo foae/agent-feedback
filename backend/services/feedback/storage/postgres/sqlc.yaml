@@ -1,0 +1,22 @@
+version: "2"
+sql:
+- engine: "postgresql"
+  schema: "migrations"
+  queries: "q.sql"
+  gen:
+    go:
+      output_files_suffix: "_gen"
+      output_db_file_name: "db_gen.go"
+      output_models_file_name: "model_gen.go"
+      emit_prepared_queries: true
+      emit_exact_table_names: false
+      omit_unused_structs: true
+      package: "sqlc"
+      sql_package: "pgx/v5"
+      out: "sqlc"
+      overrides:
+        # pkg/postgres pins pgx.QueryExecModeExec, where a plain []byte param is
+        # encoded as bytea and rejected by jsonb columns; json.RawMessage hits
+        # pgx's JSON codec regardless of exec mode.
+        - db_type: "jsonb"
+          go_type: "encoding/json.RawMessage"

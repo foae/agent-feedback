@@ -1,0 +1,31 @@
+package handler
+
+import (
+	"errors"
+	"net/http"
+
+	"agent-feedback/backend/services/feedback/core"
+)
+
+// mapSubmissionError maps core-layer errors to HTTP status codes.
+func mapSubmissionError(err error) int {
+	switch {
+	case errors.Is(err, core.ErrSubmissionNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, core.ErrInvalidInput):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// errorMessage returns the message safe to send to the client for the given
+// status: validation/client errors (< 500) surface err's message verbatim, but
+// internal errors (>= 500) never leak details like DB/dial errors to the response
+// body -- the full error still reaches the logs via slog.Error at the call site.
+func errorMessage(status int, err error) string {
+	if status >= http.StatusInternalServerError {
+		return "internal error"
+	}
+	return err.Error()
+}
