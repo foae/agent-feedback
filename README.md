@@ -67,7 +67,7 @@ under `docs/` apply as-is to `backend/services/feedback`.
 
 ### Locally (development)
 
-Requires Go 1.24, `just`, `sqlc`, and a Postgres instance.
+Requires Go 1.26, `just`, `sqlc`, and a Postgres instance.
 
 ```bash
 cd backend/services/feedback
