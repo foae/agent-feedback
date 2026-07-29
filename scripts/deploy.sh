@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 # Manual deploy of agent-feedback to the deploy-host machine (Intel Mac, Docker Desktop).
 #
-# Flow: pull the CI-built image from GHCR locally (uses your local gh auth; deploy-host
-# needs no registry credentials) → stream it over SSH into deploy-host's docker →
-# sync the image-based compose file → generate credentials on first deploy
-# (preserved afterwards) → compose up → health check.
+# Flow: fetch the CI-built image from GHCR into a tarball with crane (bypasses the
+# local docker image store; deploy-host needs no registry credentials) → stream it over
+# SSH into deploy-host's docker → sync the image-based compose file → generate
+# credentials on first deploy (preserved afterwards) → compose up → health check.
+#
+# Why crane and not `docker pull + docker save`: with docker's containerd image
+# store (workstation-a, docker 29.x), `docker save` can silently emit a tar that
+# references layer blobs it doesn't contain (content GC'd after extraction) —
+# the remote `docker load` then fails with "blobs/sha256/…: no such file or
+# directory". crane pulls the blobs straight from the registry, so the tar is
+# always complete.
 #
 # Usage:   scripts/deploy.sh [image-tag]
 #   image-tag defaults to "latest"; pass a commit SHA to deploy a specific build.
-# Requires: gh (authed), docker, ssh access as deploy-host@deploy-host (Tailscale).
+# Requires: gh (authed), crane (brew install crane), docker login config,
+#           ssh access as deploy-host@deploy-host (Tailscale).
 # The API key lives ONLY on deploy-host in ~/agent-feedback/.env — read it there.
 set -euo pipefail
 
@@ -17,14 +25,19 @@ IMAGE="ghcr.io/foae/agent-feedback:${TAG}"
 REMOTE="${DEPLOY_REMOTE:?Set DEPLOY_REMOTE to your SSH destination}"
 REMOTE_DIR=agent-feedback   # relative to the remote $HOME
 
-echo "==> Logging into GHCR locally"
+command -v crane >/dev/null || { echo "crane is required: brew install crane"; exit 1; }
+
+echo "==> Logging into GHCR locally (crane reads docker's credential config)"
 gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin >/dev/null
 
-echo "==> Pulling ${IMAGE}"
-docker pull "${IMAGE}"
+IMG_TAR=$(mktemp /tmp/agent-feedback-image-XXXXXX.tar)
+trap 'rm -f "${IMG_TAR}"' EXIT
 
-echo "==> Streaming image to ${REMOTE} (this can take a minute)"
-docker save "${IMAGE}" | ssh "${REMOTE}" docker load
+echo "==> Fetching ${IMAGE} from GHCR"
+crane pull "${IMAGE}" "${IMG_TAR}"
+
+echo "==> Streaming image to ${REMOTE}"
+ssh "${REMOTE}" docker load < "${IMG_TAR}"
 
 echo "==> Syncing compose file"
 ssh "${REMOTE}" "mkdir -p ${REMOTE_DIR}"
