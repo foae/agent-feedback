@@ -49,7 +49,7 @@ bash scripts/e2e.sh <API_KEY> [BASE_URL]   # from repo root, against a running s
 Integration tests need a real Postgres:
 
 ```bash
-docker run -d --name pg-test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=feedback_test -p 127.0.0.1:55432:5432 postgres:17-alpine
+docker run -d --name pg-test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=feedback_test -p 127.0.0.1:55432:5432 postgres:18-alpine
 cd backend && TEST_POSTGRES_URL='postgres://postgres:test@127.0.0.1:55432/feedback_test?sslmode=disable' go test -race -count=1 ./...
 docker rm -f pg-test
 ```
