@@ -101,6 +101,25 @@ and pushes it to GitHub Container Registry as
 `ghcr.io/foae/agent-feedback:latest` and `:<commit-sha>`. The image is private
 (same visibility as the repo).
 
+## Deploy to production (deploy-host)
+
+Production runs on the `deploy-host` machine (Intel Mac, Docker Desktop, reachable
+over Tailscale) as a compose stack: `postgres` + the GHCR-built service image,
+service on port `8090`. Deploys are **manual**, from this repo:
+
+```bash
+scripts/deploy.sh            # deploy :latest (most recent main build)
+scripts/deploy.sh <sha>      # deploy a specific CI-built commit
+```
+
+The script pulls the image from GHCR locally (your `gh` auth; deploy-host holds no
+registry credentials), streams it over SSH (`docker save | docker load`), syncs
+`infra/agent-feedback/docker-compose.deploy.yml` to `~/agent-feedback/` on
+deploy-host, generates credentials into `~/agent-feedback/.env` on first deploy
+(preserved on every later deploy), runs `docker compose up -d`, and health-checks.
+The API key lives only in that remote `.env`. Typical flow: merge/push to `main`
+→ wait for CI to publish the image → run the script.
+
 ## Verification
 
 ```bash

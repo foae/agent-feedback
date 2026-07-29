@@ -17,7 +17,7 @@ your task needs it. If you are instead **submitting data to the running service*
 | Change the API surface | Rules below — three artifacts must move together |
 | Understand naming/error/test conventions | [docs/conventions.md](docs/conventions.md) |
 | See how the service was scaffolded | [docs/adding-a-service.md](docs/adding-a-service.md), [docs/patterns.md](docs/patterns.md) |
-| Run / verify / deploy | Commands + Verification below; deploy docs in [README.md](README.md) |
+| Run / verify / deploy | Commands + Verification below; deploy runbook in [README.md](README.md) ("Deploy to production") |
 
 ## Layout
 
@@ -77,6 +77,18 @@ docker rm -f pg-test
 - Create endpoints are strict: unknown JSON fields → 400, bodies over 10 MiB → 413.
   Keep it that way — silent field-dropping plus idempotent replay would lose data
   irrecoverably.
+
+## Deployment facts
+
+- Production: compose stack on **deploy-host** (Intel Mac / Docker Desktop / Tailscale),
+  service at `http://deploy-host:8090`, deployed manually via `scripts/deploy.sh`
+  (full runbook in [README.md](README.md)). CI publishes the image to
+  `ghcr.io/foae/agent-feedback` on every `main` push; the script ships it to deploy-host
+  over SSH — deploy-host has no registry credentials and the API key exists only in
+  `~/agent-feedback/.env` there.
+- Changing `infra/agent-feedback/docker-compose.deploy.yml` changes what the next
+  deploy installs; the sibling `docker-compose.yml` (build-based) is for local
+  stacks only.
 
 ## Verification before you're done
 

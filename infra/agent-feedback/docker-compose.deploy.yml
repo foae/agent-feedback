@@ -1,0 +1,33 @@
+# Image-based deployment stack (no build context) — used by scripts/deploy.sh,
+# which copies this file to the target host as docker-compose.yml. The image is
+# streamed to the host by the deploy script (docker save | ssh docker load), so the
+# host needs no GHCR credentials. IMAGE_TAG is set by the deploy script; defaults
+# to latest for manual `docker compose up` on the host.
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER: feedback
+      POSTGRES_DB: feedback
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feedback -d feedback"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  feedback:
+    image: ghcr.io/foae/agent-feedback:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
