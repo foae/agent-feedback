@@ -92,6 +92,15 @@ The service listens on host port `8090` (`8090:8080`); Postgres stays inside the
 compose network. Migrations run on container startup — `docker compose up` is the
 whole deploy.
 
+## CI
+
+`.github/workflows/ci.yml` runs on every push and PR: `go vet`, build, and the
+full test suite with a real Postgres service container (integration tests run,
+they don't skip). On pushes to `main` it additionally builds the service image
+and pushes it to GitHub Container Registry as
+`ghcr.io/foae/agent-feedback:latest` and `:<commit-sha>`. The image is private
+(same visibility as the repo).
+
 ## Verification
 
 ```bash
