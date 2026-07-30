@@ -41,14 +41,20 @@ type CreateFrictionInput struct {
 	SuggestedFix     string
 	Project          string
 	Harness          string
+	// Context is auto-collected client metadata (cwd, git branch/commit,
+	// occurred_at, session id, ...). Flat string map, size-capped, stored
+	// verbatim in the payload. NEVER part of the dedupe hash — a re-run of
+	// the same friction carries a new timestamp/commit and must still dedupe.
+	Context map[string]string
 }
 
 // frictionPayload is the JSON shape stored in submissions.payload for friction submissions.
 type frictionPayload struct {
-	Category     string `json:"category"`
-	Summary      string `json:"summary"`
-	Details      string `json:"details,omitempty"`
-	SuggestedFix string `json:"suggested_fix,omitempty"`
-	Project      string `json:"project,omitempty"`
-	Harness      string `json:"harness,omitempty"`
+	Category     string            `json:"category"`
+	Summary      string            `json:"summary"`
+	Details      string            `json:"details,omitempty"`
+	SuggestedFix string            `json:"suggested_fix,omitempty"`
+	Project      string            `json:"project,omitempty"`
+	Harness      string            `json:"harness,omitempty"`
+	Context      map[string]string `json:"context,omitempty"`
 }

@@ -46,8 +46,19 @@ jobs:
           TEST_POSTGRES_URL: postgres://postgres:test@127.0.0.1:5432/feedback_test?sslmode=disable
         run: go test -race -count=1 ./...
 
+  skill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck client scripts
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          cd skills/agent-feedback/scripts && shellcheck -x ./*.sh
+      - name: hermetic client tests (mock server)
+        run: bash tests/skill/run-tests.sh
+
   image:
-    needs: test
+    needs: [test, skill]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:

@@ -137,10 +137,11 @@ func main() {
 	// Router
 	r := chi.NewRouter()
 
+	// middleware.RealIP is deliberately absent: it rewrites RemoteAddr from
+	// spoofable headers (X-Forwarded-For etc.) and nothing proxies this service.
 	r.Use(
 		middleware.Recoverer,
 		middleware.RequestID,
-		middleware.RealIP,
 		buildLoggerMiddleware(logger, cfg.EnvMode),
 		httputil.ReqMonitor(cfg.ServiceName),
 	)
@@ -157,6 +158,17 @@ func main() {
 			_, _ = w.Write([]byte("SHUTTING_DOWN"))
 			return
 		}
+		// Readiness includes the database: a wedged Postgres must fail the
+		// probe (and the deploy script's post-deploy check), not report READY
+		// while every write spools client-side.
+		pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := pg.DB().Ping(pingCtx); err != nil {
+			slog.Warn("readiness probe failed: postgres unreachable", "error", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("DB_UNAVAILABLE"))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("READY"))
 	})
@@ -169,6 +181,7 @@ func main() {
 		api.Post("/reviews", h.HandleCreateReview())
 		api.Post("/frictions", h.HandleCreateFriction())
 		api.Get("/submissions", h.HandleListSubmissions())
+		api.Post("/submissions/processed", h.HandleSetProcessed())
 		api.Get("/submissions/{id}", h.HandleGetSubmission())
 	})
 

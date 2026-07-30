@@ -18,4 +18,6 @@ type Submission struct {
 	RunID            pgtype.Text
 	Payload          json.RawMessage
 	CreatedAt        pgtype.Timestamptz
+	ProcessedAt      pgtype.Timestamptz
+	PayloadHash      pgtype.Text
 }

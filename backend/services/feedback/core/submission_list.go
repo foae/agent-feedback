@@ -19,13 +19,14 @@ const (
 // ListSubmissionsInput holds optional filters for ListSubmissions. Zero values (nil,
 // empty string) mean "no filter".
 type ListSubmissionsInput struct {
-	Type    string
-	Machine string
-	Model   string
-	Since   *time.Time
-	Until   *time.Time
-	Limit   int
-	Offset  int
+	Type      string
+	Machine   string
+	Model     string
+	Since     *time.Time
+	Until     *time.Time
+	Processed *bool
+	Limit     int
+	Offset    int
 }
 
 // ListSubmissions returns submissions matching the given filters, ordered newest
@@ -39,6 +40,7 @@ func (s *Service) ListSubmissions(ctx context.Context, in ListSubmissionsInput) 
 		CoordinatorModel: textParam(in.Model),
 		Since:            timestampParam(in.Since),
 		Until:            timestampParam(in.Until),
+		Processed:        boolParam(in.Processed),
 		Limit:            int32(limit),
 		Offset:           int32(offset),
 	}
@@ -88,4 +90,11 @@ func timestampParam(t *time.Time) pgtype.Timestamptz {
 		return pgtype.Timestamptz{}
 	}
 	return pgtype.Timestamptz{Time: *t, Valid: true}
+}
+
+func boolParam(b *bool) pgtype.Bool {
+	if b == nil {
+		return pgtype.Bool{}
+	}
+	return pgtype.Bool{Bool: *b, Valid: true}
 }

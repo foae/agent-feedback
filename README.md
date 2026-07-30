@@ -26,8 +26,10 @@ retry semantics, and copy-pasteable recipes are all in
 ## API
 
 Endpoints: `POST /api/v1/reviews`, `POST /api/v1/frictions`,
-`GET /api/v1/submissions` (filtered list), `GET /api/v1/submissions/{id}`.
-Unauthenticated: `/health`, `/ready`, `/metrics` (Prometheus).
+`GET /api/v1/submissions` (filtered list), `GET /api/v1/submissions/{id}`,
+`POST /api/v1/submissions/processed` (batch mark/unmark by the feedback processor).
+Unauthenticated: `/health` (liveness), `/ready` (readiness incl. Postgres ping),
+`/metrics` (Prometheus).
 
 The contract — request/response schemas per field, error bodies, status codes,
 idempotency, curl examples — lives in **[docs/agent-usage.md](docs/agent-usage.md)**
@@ -51,6 +53,8 @@ agent-feedback/
 │       └── .env.example
 ├── infra/agent-feedback/              # docker-compose stack (postgres + feedback)
 ├── scripts/e2e.sh                     # End-to-end contract suite (all endpoints)
+├── skills/agent-feedback/             # Canonical companion skill (SKILL.md + client scripts; see its Installation section)
+├── tests/skill/                       # Hermetic tests for the skill scripts (repo-only, never distributed)
 └── docs/
     ├── agent-usage.md                 # API contract for producer agents (start here for integration)
     ├── architecture.md                # Layer model, module strategy (template docs)
@@ -117,7 +121,9 @@ auth; deploy-host holds no registry credentials), streams it over SSH into
 `docker load`, syncs
 `infra/agent-feedback/docker-compose.deploy.yml` to `~/agent-feedback/` on
 deploy-host, generates credentials into `~/agent-feedback/.env` on first deploy
-(preserved on every later deploy), runs `docker compose up -d`, and health-checks.
+(preserved on every later deploy), runs `docker compose up -d`, and verifies
+`/ready` (which includes a Postgres ping — a deploy with a dead database fails
+the check instead of reporting healthy).
 Local prerequisites: `gh` (authed), `docker`, `crane` (`brew install crane`) —
 crane is used instead of `docker save` because docker's containerd image store
 can emit truncated save tars (see the script header).
@@ -131,6 +137,14 @@ bash scripts/e2e.sh <API_KEY> [BASE_URL]   # BASE_URL defaults to http://127.0.0
 ```
 
 Exercises every endpoint against a live deployment: auth failures, create,
-idempotent replay, validation errors (bad values, unknown fields, oversized
-bodies), list filters, get-by-id. It creates test submissions — clean up with
-`docker compose down -v` (or delete the rows) afterwards.
+identical replay, replay-mismatch 409, friction duplicate absorption, validation
+errors (bad values, unknown fields, length caps, oversized bodies), list filters
+incl. `processed`, processed mark/unmark, get-by-id. Safe to rerun against a
+persistent database (unique ids per run); it creates test submissions — clean up
+with `docker compose down -v` (or delete the rows) afterwards.
+
+The companion skill has its own hermetic suite (no stack needed):
+
+```bash
+bash tests/skill/run-tests.sh
+```

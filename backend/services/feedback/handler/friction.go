@@ -27,7 +27,7 @@ func (h *Handler) HandleCreateFriction() http.HandlerFunc {
 			return
 		}
 
-		sub, err := h.svc.CreateFriction(r.Context(), core.CreateFrictionInput{
+		sub, duplicate, err := h.svc.CreateFriction(r.Context(), core.CreateFrictionInput{
 			MachineName:      req.MachineName,
 			CoordinatorModel: req.CoordinatorModel,
 			Category:         req.Category,
@@ -36,6 +36,7 @@ func (h *Handler) HandleCreateFriction() http.HandlerFunc {
 			SuggestedFix:     req.SuggestedFix,
 			Project:          req.Project,
 			Harness:          req.Harness,
+			Context:          req.Context,
 		})
 		if err != nil {
 			status := mapSubmissionError(err)
@@ -51,6 +52,12 @@ func (h *Handler) HandleCreateFriction() http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusCreated, resp)
+		// A duplicate absorbed inside the dedupe window returns the existing
+		// row with 200 — the submitter's retry succeeded either way.
+		status := http.StatusCreated
+		if duplicate {
+			status = http.StatusOK
+		}
+		writeJSON(w, status, resp)
 	}
 }
