@@ -13,10 +13,10 @@ import (
 )
 
 const createSubmission = `-- name: CreateSubmission :one
-INSERT INTO submissions (submission_type, machine_name, coordinator_model, run_id, payload)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO submissions (submission_type, machine_name, coordinator_model, run_id, payload, payload_hash)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (submission_type, run_id) WHERE run_id IS NOT NULL DO NOTHING
-RETURNING id, submission_type, machine_name, coordinator_model, run_id, payload, created_at
+RETURNING id, submission_type, machine_name, coordinator_model, run_id, payload, created_at, processed_at, payload_hash
 `
 
 type CreateSubmissionParams struct {
@@ -25,6 +25,7 @@ type CreateSubmissionParams struct {
 	CoordinatorModel string
 	RunID            pgtype.Text
 	Payload          json.RawMessage
+	PayloadHash      pgtype.Text
 }
 
 // Not idempotent on its own: relies on the partial unique index on (submission_type, run_id)
@@ -39,6 +40,7 @@ func (q *Queries) CreateSubmission(ctx context.Context, arg CreateSubmissionPara
 		arg.CoordinatorModel,
 		arg.RunID,
 		arg.Payload,
+		arg.PayloadHash,
 	)
 	var i Submission
 	err := row.Scan(
@@ -49,12 +51,71 @@ func (q *Queries) CreateSubmission(ctx context.Context, arg CreateSubmissionPara
 		&i.RunID,
 		&i.Payload,
 		&i.CreatedAt,
+		&i.ProcessedAt,
+		&i.PayloadHash,
+	)
+	return i, err
+}
+
+const getExistingSubmissionIDs = `-- name: GetExistingSubmissionIDs :many
+SELECT id FROM submissions WHERE id = ANY($1::bigint[])
+`
+
+func (q *Queries) GetExistingSubmissionIDs(ctx context.Context, ids []int64) ([]int64, error) {
+	rows, err := q.db.Query(ctx, getExistingSubmissionIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getRecentFrictionByHash = `-- name: GetRecentFrictionByHash :one
+SELECT id, submission_type, machine_name, coordinator_model, run_id, payload, created_at, processed_at, payload_hash FROM submissions
+WHERE submission_type = 'friction' AND payload_hash = $1 AND created_at >= $2
+ORDER BY id DESC
+LIMIT 1
+`
+
+type GetRecentFrictionByHashParams struct {
+	PayloadHash pgtype.Text
+	CreatedAt   pgtype.Timestamptz
+}
+
+// Friction duplicate absorption: newest identical-content friction inside the
+// dedupe window. 'since' is computed by the caller (now - window). Best-effort
+// check-then-insert -- no unique constraint backs it (window semantics can't),
+// so a concurrent identical pair can still produce two rows; acceptable.
+func (q *Queries) GetRecentFrictionByHash(ctx context.Context, arg GetRecentFrictionByHashParams) (Submission, error) {
+	row := q.db.QueryRow(ctx, getRecentFrictionByHash, arg.PayloadHash, arg.CreatedAt)
+	var i Submission
+	err := row.Scan(
+		&i.ID,
+		&i.SubmissionType,
+		&i.MachineName,
+		&i.CoordinatorModel,
+		&i.RunID,
+		&i.Payload,
+		&i.CreatedAt,
+		&i.ProcessedAt,
+		&i.PayloadHash,
 	)
 	return i, err
 }
 
 const getSubmissionByID = `-- name: GetSubmissionByID :one
-SELECT id, submission_type, machine_name, coordinator_model, run_id, payload, created_at FROM submissions WHERE id = $1 LIMIT 1
+SELECT id, submission_type, machine_name, coordinator_model, run_id, payload, created_at, processed_at, payload_hash FROM submissions WHERE id = $1 LIMIT 1
 `
 
 func (q *Queries) GetSubmissionByID(ctx context.Context, id int64) (Submission, error) {
@@ -68,12 +129,14 @@ func (q *Queries) GetSubmissionByID(ctx context.Context, id int64) (Submission, 
 		&i.RunID,
 		&i.Payload,
 		&i.CreatedAt,
+		&i.ProcessedAt,
+		&i.PayloadHash,
 	)
 	return i, err
 }
 
 const getSubmissionByTypeAndRunID = `-- name: GetSubmissionByTypeAndRunID :one
-SELECT id, submission_type, machine_name, coordinator_model, run_id, payload, created_at FROM submissions WHERE submission_type = $1 AND run_id = $2 LIMIT 1
+SELECT id, submission_type, machine_name, coordinator_model, run_id, payload, created_at, processed_at, payload_hash FROM submissions WHERE submission_type = $1 AND run_id = $2 LIMIT 1
 `
 
 type GetSubmissionByTypeAndRunIDParams struct {
@@ -92,12 +155,19 @@ func (q *Queries) GetSubmissionByTypeAndRunID(ctx context.Context, arg GetSubmis
 		&i.RunID,
 		&i.Payload,
 		&i.CreatedAt,
+		&i.ProcessedAt,
+		&i.PayloadHash,
 	)
 	return i, err
 }
 
 const listSubmissions = `-- name: ListSubmissions :many
-SELECT id, submission_type, machine_name, coordinator_model, run_id, created_at
+SELECT
+    id, submission_type, machine_name, coordinator_model, run_id, created_at, processed_at,
+    COALESCE(payload->>'category', '')::text AS friction_category,
+    COALESCE(payload->>'summary', '')::text  AS friction_summary,
+    COALESCE(payload->>'project', '')::text  AS friction_project,
+    COALESCE(payload->>'harness', '')::text  AS friction_harness
 FROM submissions
 WHERE
     ($1::text IS NULL OR submission_type = $1)
@@ -105,8 +175,11 @@ WHERE
     AND ($3::text IS NULL OR coordinator_model = $3)
     AND ($4::timestamptz IS NULL OR created_at >= $4)
     AND ($5::timestamptz IS NULL OR created_at <= $5)
+    AND ($6::boolean IS NULL
+         OR ($6::boolean = TRUE AND processed_at IS NOT NULL)
+         OR ($6::boolean = FALSE AND processed_at IS NULL))
 ORDER BY id DESC
-LIMIT $7 OFFSET $6
+LIMIT $8 OFFSET $7
 `
 
 type ListSubmissionsParams struct {
@@ -115,6 +188,7 @@ type ListSubmissionsParams struct {
 	CoordinatorModel pgtype.Text
 	Since            pgtype.Timestamptz
 	Until            pgtype.Timestamptz
+	Processed        pgtype.Bool
 	Offset           int32
 	Limit            int32
 }
@@ -126,8 +200,15 @@ type ListSubmissionsRow struct {
 	CoordinatorModel string
 	RunID            pgtype.Text
 	CreatedAt        pgtype.Timestamptz
+	ProcessedAt      pgtype.Timestamptz
+	FrictionCategory string
+	FrictionSummary  string
+	FrictionProject  string
+	FrictionHarness  string
 }
 
+// friction_* columns are extracted from the payload for friction rows so the
+// list is scannable without an N+1 fetch; they come back NULL for review rows.
 func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error) {
 	rows, err := q.db.Query(ctx, listSubmissions,
 		arg.SubmissionType,
@@ -135,6 +216,7 @@ func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams
 		arg.CoordinatorModel,
 		arg.Since,
 		arg.Until,
+		arg.Processed,
 		arg.Offset,
 		arg.Limit,
 	)
@@ -152,10 +234,69 @@ func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams
 			&i.CoordinatorModel,
 			&i.RunID,
 			&i.CreatedAt,
+			&i.ProcessedAt,
+			&i.FrictionCategory,
+			&i.FrictionSummary,
+			&i.FrictionProject,
+			&i.FrictionHarness,
 		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markSubmissionsProcessed = `-- name: MarkSubmissionsProcessed :many
+UPDATE submissions SET processed_at = NOW()
+WHERE id = ANY($1::bigint[]) AND processed_at IS NULL
+RETURNING id
+`
+
+// Sets processed_at only where currently NULL (idempotent; the timestamp of the
+// first marking is preserved). Returns the ids actually updated.
+func (q *Queries) MarkSubmissionsProcessed(ctx context.Context, ids []int64) ([]int64, error) {
+	rows, err := q.db.Query(ctx, markSubmissionsProcessed, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const unmarkSubmissionsProcessed = `-- name: UnmarkSubmissionsProcessed :many
+UPDATE submissions SET processed_at = NULL
+WHERE id = ANY($1::bigint[]) AND processed_at IS NOT NULL
+RETURNING id
+`
+
+func (q *Queries) UnmarkSubmissionsProcessed(ctx context.Context, ids []int64) ([]int64, error) {
+	rows, err := q.db.Query(ctx, unmarkSubmissionsProcessed, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

@@ -53,8 +53,12 @@ func (h *Handler) HandleCreateReview() http.HandlerFunc {
 		})
 		if err != nil {
 			status := mapSubmissionError(err)
+			errType := "create_review_failed"
+			if errors.Is(err, core.ErrReplayMismatch) {
+				errType = "replay_mismatch"
+			}
 			slog.Error("failed to create review submission", "error", err, "skill", req.Skill, "run_id", req.RunID)
-			writeError(w, status, "create_review_failed", errorMessage(status, err))
+			writeError(w, status, errType, errorMessage(status, err))
 			return
 		}
 

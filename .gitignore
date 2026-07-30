@@ -32,3 +32,6 @@ backend/vendor
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local build output (just build)
+backend/bin/

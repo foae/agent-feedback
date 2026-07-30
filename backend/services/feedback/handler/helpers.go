@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -43,6 +44,7 @@ func submissionToResponse(sub sqlc.Submission) (SubmissionResponse, error) {
 		RunID:            textToStringPtr(sub.RunID),
 		Payload:          payload,
 		CreatedAt:        sub.CreatedAt.Time,
+		ProcessedAt:      timestamptzToTimePtr(sub.ProcessedAt),
 	}, nil
 }
 
@@ -55,6 +57,11 @@ func submissionToSummary(row sqlc.ListSubmissionsRow) SubmissionSummaryResponse 
 		CoordinatorModel: row.CoordinatorModel,
 		RunID:            textToStringPtr(row.RunID),
 		CreatedAt:        row.CreatedAt.Time,
+		ProcessedAt:      timestamptzToTimePtr(row.ProcessedAt),
+		Category:         row.FrictionCategory,
+		Summary:          row.FrictionSummary,
+		Project:          row.FrictionProject,
+		Harness:          row.FrictionHarness,
 	}
 }
 
@@ -63,4 +70,11 @@ func textToStringPtr(t pgtype.Text) *string {
 		return nil
 	}
 	return &t.String
+}
+
+func timestamptzToTimePtr(t pgtype.Timestamptz) *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	return &t.Time
 }

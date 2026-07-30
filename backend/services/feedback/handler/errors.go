@@ -14,6 +14,8 @@ func mapSubmissionError(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, core.ErrInvalidInput):
 		return http.StatusBadRequest
+	case errors.Is(err, core.ErrReplayMismatch):
+		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}

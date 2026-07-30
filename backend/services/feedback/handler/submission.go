@@ -40,6 +40,20 @@ func (h *Handler) HandleListSubmissions() http.HandlerFunc {
 			in.Until = &t
 		}
 
+		if v := q.Get("processed"); v != "" {
+			switch v {
+			case "true":
+				t := true
+				in.Processed = &t
+			case "false":
+				f := false
+				in.Processed = &f
+			default:
+				writeError(w, http.StatusBadRequest, "bad_request", "processed must be true or false")
+				return
+			}
+		}
+
 		if v := q.Get("limit"); v != "" {
 			limit, err := strconv.Atoi(v)
 			if err != nil {

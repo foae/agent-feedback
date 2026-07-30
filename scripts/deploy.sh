@@ -63,12 +63,12 @@ REMOTE_ENV
 echo "==> Starting stack (tag: ${TAG})"
 ssh "${REMOTE}" "cd ${REMOTE_DIR} && IMAGE_TAG=${TAG} docker compose up -d --remove-orphans"
 
-echo "==> Health check"
+echo "==> Readiness check (includes Postgres)"
 ssh "${REMOTE}" 'for i in $(seq 1 30); do
-  curl -sf http://127.0.0.1:8090/health >/dev/null && { echo "    healthy"; exit 0; }
+  curl -sf http://127.0.0.1:8090/ready >/dev/null && { echo "    ready"; exit 0; }
   sleep 1
 done
-echo "    health check FAILED — inspect: ssh deploy-host@deploy-host \"cd agent-feedback && docker compose logs\""
+echo "    readiness check FAILED — inspect: ssh deploy-host@deploy-host \"cd agent-feedback && docker compose logs\""
 exit 1'
 
 echo "==> Deployed ${IMAGE} — reachable at http://deploy-host:8090 (Tailscale)"

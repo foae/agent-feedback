@@ -12,6 +12,10 @@ import (
 var (
 	ErrSubmissionNotFound = errors.New("submission not found")
 	ErrInvalidInput       = errors.New("invalid input")
+	// ErrReplayMismatch: a review replay carried different content than the
+	// stored (skill, run_id) row. Mapped to 409 — corrections are new
+	// submissions, never silent discards.
+	ErrReplayMismatch = errors.New("replay mismatch")
 )
 
 // Service encapsulates all dependencies needed for business logic execution.
