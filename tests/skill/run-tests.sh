@@ -288,11 +288,12 @@ chk "review replay 200 -> duplicate, exit 0" "$(jq -n --arg o "$o" --argjson rc 
 
 # ── query.sh ─────────────────────────────────────────────────────────────────
 
-# 13. URL encoding: +02:00 offset must arrive percent-encoded
+# 13. URL encoding: +02:00 offset must arrive percent-encoded. Hex case is
+# curl-version-dependent (8.5 emits %3a, 8.21 emits %3A) — match either.
 set_mode created
 bash "$SCRIPTS/query.sh" --type friction --since "2026-07-01T00:00:00+02:00" >/dev/null 2>&1
 req=$(last_req)
-chk "query URL-encodes since (+02:00)" "$(jq -r 'if (.path|contains("since=2026-07-01T00%3A00%3A00%2B02%3A00")) then 1 else 0 end' <<<"$req")"
+chk "query URL-encodes since (+02:00)" "$(jq -r 'if (.path|test("since=2026-07-01T00%3A00%3A00%2B02%3A00"; "i")) then 1 else 0 end' <<<"$req")"
 
 # 14. read-only: a spooled payload is NOT flushed by query
 saved_url="$AGENT_FEEDBACK_URL"
