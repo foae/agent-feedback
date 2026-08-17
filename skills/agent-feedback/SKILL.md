@@ -131,6 +131,32 @@ JSON
   24 h, so transport failures and 5xx are spooled and auto-retried; a manual
   re-run after an ambiguous failure is also fine. `{"status":"duplicate"}`
   means it was already there — success, not an error.
+- **If your suggested-fix says "applied"/"fixed", name the commit SHA** in it
+  (`git log -1 --format=%h`), or state explicitly that the change is
+  uncommitted/pending. The script warns when an applied-claim carries no SHA:
+  2 of ~20 such claims in the 2026-08-17 triage were false — one had no
+  commit anywhere, one existed only as an uncommitted working-tree change
+  that a `git pull` would have destroyed.
+
+### Fixed something? Close its queue row at fix time, not triage time
+
+When a session fixes a defect that a friction report may already cover, check
+the queue and mark the row as part of the fix — don't leave it for the next
+triage run to rediscover:
+
+```bash
+bash scripts/process.sh list --type friction --limit 500 | grep -i '<keyword>'
+bash scripts/process.sh done <id>    # then name the id in the fix commit body
+```
+
+The 2026-08-17 triage spent a full validation batch re-verifying five fixes
+(lxcfs guard, pi MCP-hang defenses, zellij keybinds, statusline OAuth token
+renewal, OrbStack watchdog) that ordinary sessions had landed days earlier
+without touching the queue. Naming the friction id in the commit body is the
+fallback the friction-triage skill's commit cross-check reads; marking the
+row at fix time makes the whole re-discovery class disappear. (If the user's
+standing rules require approval before state changes, ask alongside the fix
+itself — one question, not a leftover row.)
 
 ### submit-review.sh — (re)submit a review run
 

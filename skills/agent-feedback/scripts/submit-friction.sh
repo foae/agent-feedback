@@ -95,6 +95,18 @@ fi
 [ -n "$MODEL" ]   || MODEL=$(af_detect_model)
 [ -n "$MACHINE" ] || MACHINE=$(af_machine)
 
+# Soft nudge, never a gate: a suggested_fix claiming the fix was already
+# applied should name the commit. Two of ~20 "Applied" claims in the
+# 2026-08-17 triage were false — one had no commit anywhere, one existed only
+# as an uncommitted working-tree change — and both would have been caught at
+# submission time by asking for the SHA. Warning only: sometimes the claim is
+# honest but uncommitted (say so in the text), or the commit comes later.
+if printf '%s' "$FIX" | grep -qiE '\b(applied|fixed|corrected)\b' \
+   && ! printf '%s' "$FIX" | grep -qE '\b[0-9a-f]{7,40}\b' \
+   && ! printf '%s' "$FIX" | grep -qiE '\b(will be|being|to be|not yet|pending|uncommitted|planned)\b'; then
+  af_warn "suggested-fix claims a fix was applied but names no commit SHA — include it (git log -1 --format=%h), or state explicitly that the change is uncommitted/pending"
+fi
+
 # Auto-collected context; agent-provided context keys (stdin) win per-key.
 CONTEXT_JSON=$(jq -cn --argjson auto "$(af_collect_context)" --argjson extra "$EXTRA_CONTEXT" '$auto + $extra')
 
