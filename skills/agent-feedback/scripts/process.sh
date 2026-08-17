@@ -60,18 +60,23 @@ set_processed() { # <true|false> <id...>
 }
 
 list_cmd() {
-  local as_json=0 all=0
-  declare -a PARAMS=(--data-urlencode "limit=50")
+  local as_json=0 all=0 limit=50
+  declare -a PARAMS=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --type)    PARAMS+=(--data-urlencode "type=${2:-}"); shift 2 ;;
       --machine) PARAMS+=(--data-urlencode "machine=${2:-}"); shift 2 ;;
-      --limit)   PARAMS+=(--data-urlencode "limit=${2:-}"); shift 2 ;;
+      # limit is a plain variable, not appended to PARAMS here: the old code
+      # seeded PARAMS with limit=50 and --limit APPENDED a second limit param
+      # — the server honors the FIRST, so --limit was silently a no-op and a
+      # 54-row queue looked like exactly 50 (friction 316).
+      --limit)   limit="${2:-50}"; shift 2 ;;
       --all)     all=1; shift ;;
       --json)    as_json=1; shift ;;
       *) usage ;;
     esac
   done
+  PARAMS+=(--data-urlencode "limit=$limit")
   [ "$all" = 1 ] || PARAMS+=(--data-urlencode "processed=false")
 
   af_request_get "/api/v1/submissions" "${PARAMS[@]}"
@@ -85,6 +90,14 @@ list_cmd() {
           (.category // .run_id // "-"),
           ((.summary // "-") | gsub("[\\n\\t]"; " ") | .[0:160])
         ] | @tsv' "$AF_RESP"
+      # A result set exactly at the limit almost always means truncation —
+      # say so instead of letting the caller mistake a page for the queue
+      # (friction 221: a 64-row backlog read as "50, all of it").
+      local __n
+      __n=$(jq '.submissions | length' "$AF_RESP" 2>/dev/null || echo 0)
+      if [ "$__n" -ge "$limit" ]; then
+        af_warn "showing $__n row(s) — at the --limit cap; there may be more (re-run with a larger --limit)"
+      fi
     fi
   elif [ "$AF_HTTP_CODE" = 000 ]; then
     af_die "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
