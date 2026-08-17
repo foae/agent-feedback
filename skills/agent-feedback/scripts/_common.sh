@@ -197,12 +197,36 @@ af_flush_spool() {
 # OPENCODE_*/CODEX_*): API keys exported from shell profiles (OPENCODE_API_KEY,
 # CODEX_API_KEY) leak into every session and would false-positive.
 # PI_MODEL/OPENCODE_MODEL are legacy wrapper vars kept as a last resort.
+# omp exports NEITHER marker to its child shells — PI_CODING_AGENT_DIR and
+# OMP_PROFILE are inputs it READS (src/cli.ts), not outputs it sets — so the
+# env branch above never fires and an omp session either inherits CLAUDECODE=1
+# (omp launched from a Claude Code session → misattributed 'claude-code',
+# friction 216, recurred as id 265) or falls through to 'unknown'. Until omp
+# exports a marker, walk the process ancestry for an omp process. Match
+# '@oh-my-pi' (unique to omp's package path) and the omp launcher itself —
+# NEVER bare 'pi-coding-agent', which also matches pi's own package
+# (@earendil-works/pi-coding-agent).
+af_has_omp_ancestor() {
+  local pid=$$ args i=0
+  while [ "$pid" -gt 1 ] && [ "$i" -lt 15 ]; do
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || break
+    case "$args" in
+      *oh-my-pi*|*"/omp "*|"omp "*|*"/omp") return 0 ;;
+    esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || break
+    [ -n "$pid" ] || break
+    i=$((i + 1))
+  done
+  return 1
+}
+
 af_detect_harness() {
   if [ -n "${AGENT_FEEDBACK_HARNESS:-}" ]; then printf '%s' "$AGENT_FEEDBACK_HARNESS"
   elif [ -n "${PI_CODING_AGENT_DIR:-}" ] || [ -n "${OMP_PROFILE:-}" ]; then printf 'omp'
   elif [ -n "${PI_CODING_AGENT:-}" ]; then printf 'pi'
   elif [ -n "${OPENCODE:-}" ]; then printf 'opencode'
   elif [ -n "${CODEX_SANDBOX:-}" ]; then printf 'codex'
+  elif af_has_omp_ancestor; then printf 'omp'
   elif [ -n "${CLAUDECODE:-}" ]; then printf 'claude-code'
   elif [ -n "${PI_MODEL:-}" ]; then printf 'pi'
   elif [ -n "${OPENCODE_MODEL:-}" ]; then printf 'opencode'
