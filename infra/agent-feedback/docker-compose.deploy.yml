@@ -6,9 +6,9 @@ services:
   postgres:
     image: postgres:18-alpine
     restart: unless-stopped
-    env_file: .env
     environment:
       POSTGRES_USER: feedback
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: feedback
     volumes:
       - postgres-data:/var/lib/postgresql
@@ -21,12 +21,23 @@ services:
   feedback:
     image: ${FEEDBACK_IMAGE:?Set FEEDBACK_IMAGE to your full image reference}
     restart: unless-stopped
+    stop_grace_period: 2m
     ports:
-      - "8090:8080"
-    env_file: .env
+      # Loopback is the safe default. Set FEEDBACK_BIND_ADDRESS=0.0.0.0 only
+      # when a deliberately configured reverse proxy or firewall fronts it.
+      - "${FEEDBACK_BIND_ADDRESS:-127.0.0.1}:8090:8080"
+    environment:
+      API_KEY: ${API_KEY:?Set API_KEY in .env}
+      POSTGRES_URL: ${POSTGRES_URL:?Set POSTGRES_URL in .env}
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/ready >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
 volumes:
   postgres-data:

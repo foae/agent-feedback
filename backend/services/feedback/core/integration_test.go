@@ -194,6 +194,63 @@ func TestIntegration_CreateFriction_DuplicateAbsorption(t *testing.T) {
 	}
 }
 
+func TestIntegration_CreateFriction_ConcurrentDuplicateAbsorption(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	in := CreateFrictionInput{
+		MachineName:      uniqueRunID(t),
+		CoordinatorModel: "claude-fable-5",
+		Category:         "tooling",
+		Summary:          "concurrent duplicate",
+	}
+
+	type result struct {
+		id        int64
+		duplicate bool
+		err       error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			sub, duplicate, err := svc.CreateFriction(ctx, in)
+			results <- result{id: sub.ID, duplicate: duplicate, err: err}
+		}()
+	}
+	close(start)
+
+	ids := make(map[int64]struct{}, 2)
+	created := 0
+	duplicates := 0
+	for range 2 {
+		res := <-results
+		if res.err != nil {
+			t.Fatalf("concurrent create: %v", res.err)
+		}
+		ids[res.id] = struct{}{}
+		if res.duplicate {
+			duplicates++
+		} else {
+			created++
+		}
+	}
+	if created != 1 || duplicates != 1 {
+		t.Fatalf("expected one creation and one duplicate, got created=%d duplicates=%d", created, duplicates)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("expected both results to identify one row, got ids=%v", ids)
+	}
+
+	rows, err := svc.ListSubmissions(ctx, ListSubmissionsInput{Type: "friction", Machine: in.MachineName})
+	if err != nil {
+		t.Fatalf("list concurrent frictions: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected exactly one stored friction, got %d", len(rows))
+	}
+}
+
 func TestIntegration_CreateReview_ReplayMismatch(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
@@ -407,6 +464,76 @@ func TestIntegration_SetProcessed(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].ID != friction.ID {
 		t.Fatalf("expected exactly the unmarked friction to be unprocessed, got %+v", rows)
+	}
+}
+
+func TestIntegration_SetProcessed_ConcurrentClassification(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	machine := uniqueRunID(t)
+
+	first, _, err := svc.CreateFriction(ctx, CreateFrictionInput{
+		MachineName:      machine,
+		CoordinatorModel: "claude-fable-5",
+		Category:         "tooling",
+		Summary:          "first concurrent processing row",
+	})
+	if err != nil {
+		t.Fatalf("create first friction: %v", err)
+	}
+	second, _, err := svc.CreateFriction(ctx, CreateFrictionInput{
+		MachineName:      machine,
+		CoordinatorModel: "claude-fable-5",
+		Category:         "tooling",
+		Summary:          "second concurrent processing row",
+	})
+	if err != nil {
+		t.Fatalf("create second friction: %v", err)
+	}
+
+	type result struct {
+		value SetProcessedResult
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for _, ids := range [][]int64{{first.ID, second.ID}, {second.ID, first.ID}} {
+		ids := ids
+		go func() {
+			<-start
+			value, err := svc.SetProcessed(ctx, SetProcessedInput{IDs: ids, Processed: true})
+			results <- result{value: value, err: err}
+		}()
+	}
+	close(start)
+
+	updatedBatches := 0
+	unchangedBatches := 0
+	for range 2 {
+		res := <-results
+		if res.err != nil {
+			t.Fatalf("concurrent set processed: %v", res.err)
+		}
+		switch {
+		case len(res.value.Updated) == 2 && len(res.value.Unchanged) == 0 && len(res.value.NotFound) == 0:
+			updatedBatches++
+		case len(res.value.Updated) == 0 && len(res.value.Unchanged) == 2 && len(res.value.NotFound) == 0:
+			unchangedBatches++
+		default:
+			t.Fatalf("expected one atomic classification per batch, got %+v", res.value)
+		}
+	}
+	if updatedBatches != 1 || unchangedBatches != 1 {
+		t.Fatalf("expected one updated batch and one unchanged batch, got updated=%d unchanged=%d", updatedBatches, unchangedBatches)
+	}
+
+	processed := true
+	rows, err := svc.ListSubmissions(ctx, ListSubmissionsInput{Machine: machine, Processed: &processed})
+	if err != nil {
+		t.Fatalf("list processed rows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected both rows to remain processed, got %d", len(rows))
 	}
 }
 

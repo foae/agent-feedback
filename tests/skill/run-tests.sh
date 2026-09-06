@@ -160,6 +160,84 @@ bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "post-500 flush"
 n_spool=$(find "$SPOOL" \( -name 'friction-*.json' -o -name 'friction-*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
 chk "500-spooled friction flushed after recovery" "$([ "$n_spool" = 0 ] && echo 1 || echo 0)"
 
+# 8a. Credentials stay in a protected curl header file, never curl's argv.
+FAKE_BIN="$WORK/fake-bin"
+mkdir -p "$FAKE_BIN"
+cat >"$FAKE_BIN/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$CURL_ARGS"
+out=""
+prev=""
+for ((i = 1; i <= $#; i++)); do
+  arg="${!i}"
+  if [ "$arg" = "-o" ]; then
+    next=$((i + 1)); out="${!next}"
+  elif [ "$prev" = "-H" ] && [[ "$arg" == @* ]]; then
+    header="${arg#@}"
+    printf '%s' "$header" >"$CURL_HEADER_PATH"
+    if stat -c '%a' "$header" >"$CURL_HEADER_MODE" 2>/dev/null; then :; else
+      stat -f '%Lp' "$header" >"$CURL_HEADER_MODE"
+    fi
+    cat "$header" >"$CURL_HEADER_CONTENTS"
+  fi
+  prev="$arg"
+done
+printf '{"id":101,"submission_type":"friction"}' >"$out"
+printf 201
+SH
+chmod +x "$FAKE_BIN/curl"
+out=$(PATH="$FAKE_BIN:$PATH" CURL_ARGS="$WORK/curl.args" \
+  CURL_HEADER_PATH="$WORK/curl.header.path" CURL_HEADER_MODE="$WORK/curl.header.mode" \
+  CURL_HEADER_CONTENTS="$WORK/curl.header.contents" \
+  bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "header file" --model m 2>/dev/null)
+header_path=$(cat "$WORK/curl.header.path")
+args=$(cat "$WORK/curl.args")
+contents=$(cat "$WORK/curl.header.contents")
+case "$args" in *testkey*) no_secret_argv=0 ;; *) no_secret_argv=1 ;; esac
+chk "friction auth key stays out of curl argv and protected header is cleaned" \
+  "$([ "$no_secret_argv" = 1 ] && [ "$(cat "$WORK/curl.header.mode")" = 600 ] \
+    && [ "$contents" = "Authorization: Bearer testkey" ] && [ ! -e "$header_path" ] && echo 1 || echo 0)"
+
+# 8b. Header injection in an environment key is rejected before any request.
+before=$(log_len)
+AGENT_FEEDBACK_API_KEY=$'testkey\r\nX-Injected: yes' \
+  bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "bad key" --model m >/dev/null 2>&1
+rc=$?
+chk "CRLF API key rejects locally without requests" \
+  "$([ "$rc" -ne 0 ] && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
+
+# 8c. A malformed friction success is spooled directly and remains retained
+# when a later flush sees a different malformed success shape.
+set_mode friction_bad_created
+out=$(bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "malformed receipt" --model m 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+n_spool=$(find "$SPOOL" -name 'friction-*.json' 2>/dev/null | wc -l | tr -d ' ')
+chk "malformed friction 201 is spooled rather than acknowledged" "$(jq -n \
+  --arg o "$o" --argjson rc "$rc" --argjson n "$n_spool" \
+  '($o|fromjson) as $j | if $j.status=="spooled" and $j.reason=="malformed_success_response" and $rc==0 and $n==1 then 1 else 0 end')"
+set_mode friction_wrong_duplicate
+bash "$SCRIPTS/query.sh" --type friction --flush >/dev/null 2>&1
+n_spool=$(find "$SPOOL" \( -name 'friction-*.json' -o -name 'friction-*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
+chk "flush retains friction when 200 has wrong submission type" "$([ "$n_spool" = 1 ] && echo 1 || echo 0)"
+set_mode created
+bash "$SCRIPTS/query.sh" --type friction --flush >/dev/null 2>&1
+n_spool=$(find "$SPOOL" \( -name 'friction-*.json' -o -name 'friction-*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
+chk "well-formed later friction receipt clears retained spool" "$([ "$n_spool" = 0 ] && echo 1 || echo 0)"
+
+# 8d. Rejected reports are visible until their bounded retention expires.
+mkdir -p "$SPOOL"
+printf '{"summary":"expired rejected"}' >"$SPOOL/friction-expired.rejected"
+touch -d '8 days ago' "$SPOOL/friction-expired.rejected"
+out=$(bash "$SCRIPTS/query.sh" --type friction --flush 2>&1)
+expired_gone=$([ ! -e "$SPOOL/friction-expired.rejected" ] && echo 1 || echo 0)
+printf '{"summary":"fresh rejected"}' >"$SPOOL/friction-fresh.rejected"
+out=$(bash "$SCRIPTS/query.sh" --type friction --flush 2>&1)
+case "$out" in *"spool backlog: 1 rejected submission"*) rejected_visible=1 ;; *) rejected_visible=0 ;; esac
+chk "rejected spool has bounded retention and a visible backlog warning" \
+  "$([ "$expired_gone" = 1 ] && [ "$rejected_visible" = 1 ] && echo 1 || echo 0)"
+rm -f "$SPOOL/friction-fresh.rejected"
+
 # 8a. auto-context outside a git repo: base keys present, git keys absent
 set_mode created
 bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "ctx nogit" --model m >/dev/null 2>&1
@@ -179,7 +257,7 @@ GITDIR="$WORK/myrepo"
 mkdir -p "$GITDIR"
 git -C "$GITDIR" -c init.defaultBranch=main init -q
 git -C "$GITDIR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
-git -C "$GITDIR" remote add origin "https://user:tok123@example.com/org/myrepo.git"
+git -C "$GITDIR" remote add origin "https://user:tok123@example.com/org/myrepo.git?access_token=leak#fragment"
 echo dirty >"$GITDIR/f"
 (cd "$GITDIR" && bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "ctx git" --model m >/dev/null 2>&1)
 req=$(last_req)
@@ -191,6 +269,19 @@ chk "context git fields + sanitized remote + auto project" "$(jq -r --arg root "
   and .body.context.git_dirty=="true"
   and .body.context.repo_root==$root
   then 1 else 0 end' <<<"$req")"
+
+# 8c. SCP-style usernames are also collection-only metadata, while caller
+# context remains untouched by sanitization.
+git -C "$GITDIR" remote set-url origin "gituser@example.com:org/scprepo.git"
+(cd "$GITDIR" && bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "ctx scp" --model m >/dev/null 2>&1)
+req=$(last_req)
+chk "context strips SCP remote username" "$(jq -r '
+  if .body.project=="scprepo" and .body.context.git_remote=="example.com:org/scprepo.git" then 1 else 0 end' <<<"$req")"
+printf '%s' '{"category":"tooling","summary":"explicit remote","context":{"git_remote":"https://caller:keep@example.com/p.git?keep#keep"}}' \
+  | bash "$SCRIPTS/submit-friction.sh" --stdin --model m >/dev/null 2>&1
+req=$(last_req)
+chk "explicit context remote is not rewritten" "$(jq -r '
+  if .body.context.git_remote=="https://caller:keep@example.com/p.git?keep#keep" then 1 else 0 end' <<<"$req")"
 
 # 8c. session/agent/effort picked up from the environment when present
 AGENT_FEEDBACK_SESSION_ID="sess-123" AI_AGENT="test-harness_9" CLAUDE_EFFORT="high" \
@@ -298,6 +389,95 @@ rc=$?
 o=$(outcome "$out")
 chk "review replay 200 -> duplicate, exit 0" "$(jq -n --arg o "$o" --argjson rc "$rc" \
   '($o|fromjson) as $j | if $j.status=="duplicate" and $j.id==102 and $rc==0 then 1 else 0 end')"
+# 12a. Blank optional counts do not discard a completed score, and a delayed
+# retry attributes the payload to the run's original caller.
+RUN_OPTIONAL="$RUN_BASE/20260730-202020-optional"
+mkdir -p "$RUN_OPTIONAL"
+cat >"$RUN_OPTIONAL/meta.json" <<'JSON'
+{"machine":"testmach","skill":"multi-llm-review","run_ts":"20260730-202020",
+ "caller":"original-caller-model","slots":{"one":{"label":"Optional Counts"}}}
+JSON
+printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$RUN_OPTIONAL/summary.tsv"
+printf '20260730-202020\tx\tOptional Counts\t4\t\t\ttab\tpreserved\n' >>"$RUN_BASE/scorecards.tsv"
+set_mode created
+out=$(REVIEW_CALLER_MODEL="resubmitting-shell-model" bash "$SCRIPTS/submit-review.sh" "$RUN_OPTIONAL" 2>/dev/null)
+rc=$?
+req=$(last_req)
+chk "review keeps score with blank optional counts, tabs, and original caller" "$(jq -r --argjson rc "$rc" '
+  if $rc==0 and .body.coordinator_model=="original-caller-model"
+  and .body.reviewers[0].score==4
+  and (.body.reviewers[0] | has("valid") | not)
+  and (.body.reviewers[0] | has("invalid") | not)
+  and .body.reviewers[0].note=="tab\tpreserved"
+  then 1 else 0 end' <<<"$req")"
+
+# 12b. Direct submission refuses a PENDING scorecard before allocating run_id.
+RUN_PENDING="$RUN_BASE/20200101-000000-pending"
+mkdir -p "$RUN_PENDING"
+cat >"$RUN_PENDING/meta.json" <<'JSON'
+{"machine":"testmach","skill":"multi-llm-review","run_ts":"20200101-000000",
+ "caller":"caller","slots":{"one":{"label":"Pending Grade"}}}
+JSON
+printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$RUN_PENDING/summary.tsv"
+printf '20200101-000000\tx\tPending Grade\tPENDING\t\t\t\n' >>"$RUN_BASE/scorecards.tsv"
+before=$(log_len)
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_PENDING" 2>/dev/null)
+rc=$?
+chk "direct review refuses PENDING scorecard without request or marker" \
+  "$([ "$rc" -ne 0 ] && [ "$(log_len)" -eq "$before" ] && [ ! -e "$RUN_PENDING/.submitted" ] && echo 1 || echo 0)"
+
+# 12c. Sweep likewise leaves a completed run with no scorecard unsubmitted.
+RUN_MISSING="$RUN_BASE/20200101-000001-missing"
+mkdir -p "$RUN_MISSING"
+cat >"$RUN_MISSING/meta.json" <<'JSON'
+{"machine":"testmach","skill":"multi-llm-review","run_ts":"20200101-000001",
+ "caller":"caller","slots":{"one":{"label":"Missing Grade"}}}
+JSON
+printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$RUN_MISSING/summary.tsv"
+before=$(log_len)
+SWEEP_MIN_AGE_HOURS=0 bash "$SCRIPTS/submit-review.sh" --sweep >/dev/null 2>&1
+chk "sweep refuses missing scorecard without request or marker" \
+  "$([ "$(log_len)" -eq "$before" ] && [ ! -e "$RUN_MISSING/.submitted" ] && echo 1 || echo 0)"
+
+# 12d. Timestamp-only scorecards cannot disambiguate sibling runs.
+RUN_AMBIG_A="$RUN_BASE/20200101-000002-a"
+RUN_AMBIG_B="$RUN_BASE/20200101-000002-b"
+mkdir -p "$RUN_AMBIG_A" "$RUN_AMBIG_B"
+for run in "$RUN_AMBIG_A" "$RUN_AMBIG_B"; do
+  cat >"$run/meta.json" <<'JSON'
+{"machine":"testmach","skill":"multi-llm-review","run_ts":"20200101-000002",
+ "caller":"caller","slots":{"one":{"label":"Shared Timestamp"}}}
+JSON
+  printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$run/summary.tsv"
+done
+printf '20200101-000002\tx\tShared Timestamp\t5\t1\t0\tok\n' >>"$RUN_BASE/scorecards.tsv"
+before=$(log_len)
+bash "$SCRIPTS/submit-review.sh" "$RUN_AMBIG_A" >/dev/null 2>&1
+rc=$?
+chk "ambiguous timestamp refuses score borrowing without request or marker" \
+  "$([ "$rc" -ne 0 ] && [ "$(log_len)" -eq "$before" ] && [ ! -e "$RUN_AMBIG_A/.submitted" ] && echo 1 || echo 0)"
+
+# 12e. Sweep recovers locks without metadata or with corrupt metadata by
+# directory mtime, while a live owner remains protected even past the threshold.
+LOCK="$HOME/.cache/agent-feedback/sweep.lock"
+mkdir -p "$(dirname "$LOCK")"
+mkdir "$LOCK"
+touch -d '2 minutes ago' "$LOCK"
+SWEEP_LOCK_STALE_SECS=1 SWEEP_MIN_AGE_HOURS=100000 bash "$SCRIPTS/submit-review.sh" --sweep >/dev/null 2>&1
+missing_lock_recovered=$([ ! -e "$LOCK" ] && echo 1 || echo 0)
+mkdir "$LOCK"
+printf 'corrupt\n' >"$LOCK/born"
+touch -d '2 minutes ago' "$LOCK"
+SWEEP_LOCK_STALE_SECS=1 SWEEP_MIN_AGE_HOURS=100000 bash "$SCRIPTS/submit-review.sh" --sweep >/dev/null 2>&1
+corrupt_lock_recovered=$([ ! -e "$LOCK" ] && echo 1 || echo 0)
+mkdir "$LOCK"
+printf '%s\n' "$$:ancient:owner" >"$LOCK/owner"
+printf '1\n' >"$LOCK/born"
+SWEEP_LOCK_STALE_SECS=1 SWEEP_MIN_AGE_HOURS=100000 bash "$SCRIPTS/submit-review.sh" --sweep >/dev/null 2>&1
+live_lock_preserved=$([ -d "$LOCK" ] && [ "$(cat "$LOCK/owner")" = "$$:ancient:owner" ] && echo 1 || echo 0)
+chk "sweep lock recovers stale missing/corrupt metadata but preserves live owner" \
+  "$([ "$missing_lock_recovered" = 1 ] && [ "$corrupt_lock_recovered" = 1 ] && [ "$live_lock_preserved" = 1 ] && echo 1 || echo 0)"
+rm -rf "$LOCK"
 
 # ── query.sh ─────────────────────────────────────────────────────────────────
 

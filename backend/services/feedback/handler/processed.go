@@ -1,8 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 
@@ -13,18 +11,8 @@ import (
 // mark/unmark of the processed_at flag by the async feedback processor.
 func (h *Handler) HandleSetProcessed() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
-
 		var req SetProcessedRequest
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			var maxBytesErr *http.MaxBytesError
-			if errors.As(err, &maxBytesErr) {
-				writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 10 MiB")
-				return
-			}
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid request body: "+err.Error())
+		if !decodeRequestBody(w, r, &req) {
 			return
 		}
 
@@ -40,7 +28,9 @@ func (h *Handler) HandleSetProcessed() http.HandlerFunc {
 		if err != nil {
 			status := mapSubmissionError(err)
 			if status >= http.StatusInternalServerError {
-				slog.Error("failed to set processed state", "error", err)
+				slog.ErrorContext(r.Context(), "failed to set processed state", "error", err)
+			} else {
+				slog.WarnContext(r.Context(), "rejected processed state request", "error", err)
 			}
 			writeError(w, status, "set_processed_failed", errorMessage(status, err))
 			return

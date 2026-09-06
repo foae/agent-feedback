@@ -57,30 +57,6 @@ func (q *Queries) CreateSubmission(ctx context.Context, arg CreateSubmissionPara
 	return i, err
 }
 
-const getExistingSubmissionIDs = `-- name: GetExistingSubmissionIDs :many
-SELECT id FROM submissions WHERE id = ANY($1::bigint[])
-`
-
-func (q *Queries) GetExistingSubmissionIDs(ctx context.Context, ids []int64) ([]int64, error) {
-	rows, err := q.db.Query(ctx, getExistingSubmissionIDs, ids)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		items = append(items, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const getRecentFrictionByHash = `-- name: GetRecentFrictionByHash :one
 SELECT id, submission_type, machine_name, coordinator_model, run_id, payload, created_at, processed_at, payload_hash FROM submissions
 WHERE submission_type = 'friction' AND payload_hash = $1 AND created_at >= $2
@@ -94,9 +70,7 @@ type GetRecentFrictionByHashParams struct {
 }
 
 // Friction duplicate absorption: newest identical-content friction inside the
-// dedupe window. 'since' is computed by the caller (now - window). Best-effort
-// check-then-insert -- no unique constraint backs it (window semantics can't),
-// so a concurrent identical pair can still produce two rows; acceptable.
+// dedupe window. The caller holds LockFrictionDedupe for this hash.
 func (q *Queries) GetRecentFrictionByHash(ctx context.Context, arg GetRecentFrictionByHashParams) (Submission, error) {
 	row := q.db.QueryRow(ctx, getRecentFrictionByHash, arg.PayloadHash, arg.CreatedAt)
 	var i Submission
@@ -240,6 +214,53 @@ func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams
 			&i.FrictionProject,
 			&i.FrictionHarness,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockFrictionDedupe = `-- name: LockFrictionDedupe :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+`
+
+// A transaction-scoped advisory lock serializes duplicate absorption for one
+// content hash. It must run as its own statement before the lookup so the
+// latter gets a fresh READ COMMITTED snapshot after any lock wait.
+func (q *Queries) LockFrictionDedupe(ctx context.Context, payloadHash string) error {
+	_, err := q.db.Exec(ctx, lockFrictionDedupe, payloadHash)
+	return err
+}
+
+const lockSubmissionProcessingStates = `-- name: LockSubmissionProcessingStates :many
+SELECT id, processed_at
+FROM submissions
+WHERE id = ANY($1::bigint[])
+ORDER BY id
+FOR UPDATE
+`
+
+type LockSubmissionProcessingStatesRow struct {
+	ID          int64
+	ProcessedAt pgtype.Timestamptz
+}
+
+// Locks candidate rows in a stable order so classification and the state
+// transition observe one atomic snapshot.
+func (q *Queries) LockSubmissionProcessingStates(ctx context.Context, ids []int64) ([]LockSubmissionProcessingStatesRow, error) {
+	rows, err := q.db.Query(ctx, lockSubmissionProcessingStates, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockSubmissionProcessingStatesRow
+	for rows.Next() {
+		var i LockSubmissionProcessingStatesRow
+		if err := rows.Scan(&i.ID, &i.ProcessedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

@@ -137,12 +137,21 @@ af_flush_spool
 
 af_request POST "/api/v1/frictions" "$PAYLOAD"
 case "$AF_HTTP_CODE" in
-  201)
-    af_outcome "$(jq -c '{status:"submitted",id:.id}' "$AF_RESP")"
-    ;;
-  200)
-    # Identical content within the server's 24h dedupe window — absorbed.
-    af_outcome "$(jq -c '{status:"duplicate",id:.id}' "$AF_RESP")"
+  201|200)
+    if af_friction_response_valid "$AF_RESP"; then
+      if [ "$AF_HTTP_CODE" = 201 ]; then
+        af_outcome "$(jq -c '{status:"submitted",id:.id}' "$AF_RESP")"
+      else
+        # Identical content within the server's 24h dedupe window — absorbed.
+        af_outcome "$(jq -c '{status:"duplicate",id:.id}' "$AF_RESP")"
+      fi
+    else
+      # A 2xx alone cannot prove the server accepted this friction payload.
+      # Retain it for a later retry rather than silently losing it.
+      af_warn "service returned malformed friction success response — spooling"
+      af_spool "friction" "$PAYLOAD"
+      af_outcome '{"status":"spooled","reason":"malformed_success_response"}'
+    fi
     ;;
   000)
     af_warn "service unreachable (curl exit $AF_CURL_EXIT) — spooling"

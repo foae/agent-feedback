@@ -50,8 +50,8 @@ sqlc-vet:
 sqlc-generate: sqlc-vet
     sqlc generate -f {{_sqlc_yaml}}
 
-# Run all checks: fmt, vet, sqlc lint, tidy, build. Use as a pre-commit gate.
-check: fmt vet sqlc-vet tidy build
+# Generate SQL as part of the local gate; CI checks the resulting tree for drift.
+check: fmt vet sqlc-generate tidy build
 
 # Build Docker image tagged as <service-name>.
 docker-build:

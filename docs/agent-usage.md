@@ -44,13 +44,15 @@ Postgres ping**), `GET /metrics` (Prometheus) require no auth.
 
 ## Request body limits and strictness
 
-Both POST endpoints:
+All three POST endpoints:
 
 - Reject unknown JSON fields with `400 {"error": "bad_request", "message": "..."}` —
   the message names the offending field. A typo'd field name is a bug, not something
   to silently drop (a dropped field plus an idempotent replay is unrecoverable
   telemetry loss).
 - Reject request bodies over 10 MiB with `413 {"error": "request_too_large", "message": "request body exceeds 10 MiB"}`.
+- Require exactly one JSON value; trailing values or garbage return `400`.
+  The size limit includes trailing whitespace after the value.
 
 Field length limits (400 naming the field when exceeded, e.g.
 `invalid input: run_id exceeds 200 bytes`). They exist to protect the database,
@@ -78,6 +80,9 @@ request cap:
   new `run_id` — never a silent overwrite, never a silent discard.
 - Content identity covers `machine_name`, `coordinator_model`, `prompt`, and the
   full `reviewers` array (sha256 over a canonical encoding, stored server-side).
+- Legacy review rows created before payload hashing have a null hash. Replays
+  return `200` with the existing row without content comparison; they cannot
+  establish that your payload matches. Use a new run ID for corrections.
 
 **Frictions** (`POST /api/v1/frictions`) have no `run_id`. Instead the server
 absorbs duplicates by content:
@@ -91,12 +96,13 @@ absorbs duplicates by content:
   recurrence stays visible to the feedback processor.
 - The `context` object does **not** participate in content identity — attempts
   of the same friction differ in timestamp/commit/cwd and must still dedupe.
+- Concurrent identical creates serialize the lookup and insert in a transaction.
 
 ## Processing lifecycle
 
 Submissions carry a single mutable field, `processed_at` (`null` until set).
-The async feedback processor — running from any machine — marks submissions
-after acting on them; everything else about a submission is write-once.
+An external consumer marks submissions after acting on them; no processor is
+bundled with the service. Everything else about a submission is write-once.
 
 ### POST /api/v1/submissions/processed
 
@@ -117,6 +123,7 @@ Success: `200`, every requested id classified:
 - `unchanged` — already in the requested state (marking is idempotent; the
   original `processed_at` timestamp is preserved on re-marks).
 - `not_found` — no such submission.
+- Classification and updates run atomically in one transaction.
 
 Error: `400` with `{"error": "set_processed_failed", "message": "..."}` for
 empty/oversized/non-positive `ids`.
@@ -388,3 +395,11 @@ run-dir layout it consumes (`~/.cache/<skill>/<run_ts>-<pid>/`):
 The client's `run_id` is `<machine>-<basename of run dir>` (i.e.
 `<machine>-<run_ts>-<pid>`), which keeps run ids unique across machines and
 same-second sibling runs.
+
+The client requires a grade for every completed reviewer before submission.
+Optional blank finding counts are omitted, not converted to zero. Attribution
+uses `meta.json.caller`, not the shell that later retries the run. Timestamp-only
+scorecards cannot disambiguate sibling runs with the same timestamp: the client
+refuses them rather than borrowing scores. Resolve this in the external ledger.
+Scores are coordinator judgments, not independently verified quality measures;
+see [methodology limitations](../README.md#interpreting-review-data).

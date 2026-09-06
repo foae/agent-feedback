@@ -132,7 +132,7 @@ func main() {
 	defer svc.Close()
 
 	// Handler
-	h := handler.New(svc, cfg.EnvMode)
+	h := handler.New(svc)
 
 	// Router
 	r := chi.NewRouter()
