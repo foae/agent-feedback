@@ -1,150 +1,286 @@
 # agent-feedback
 
-A Go JSON REST service that centralizes LLM-agent telemetry — multi-model
-review-run results (timings, raw outputs, grading scores) and free-form
-"friction" reports — into Postgres. Producers (skills, harness directives)
-previously wrote this data to per-machine local files; this service is the
-control center they submit to instead, so the data can be mined to improve
-skills, tooling, docs, and system prompts across the fleet.
+**A self-hosted inbox for feedback from AI coding agents.** A small Go REST API
+stores multi-model review results and reports of tooling/documentation problems
+in PostgreSQL. A companion Bash skill lets agents submit, query, and mark that
+feedback as processed.
 
-## Using this repo as an agent
+Use it when feedback from several agent sessions or machines would otherwise
+remain scattered in local files. For example, an agent reports a broken setup
+instruction; a maintainer retrieves unprocessed reports, fixes the instruction,
+and marks the report processed.
 
-Route by what you came here to do — each destination is self-contained:
+## What it does — and does not do
 
-| You are... | Read |
-|---|---|
-| **Wiring a skill/script to submit feedback** (build a recipe: env vars, payloads, curl) | [docs/agent-usage.md](docs/agent-usage.md) — the full API contract, written for agents; you need nothing else |
-| **Changing this service's code** | [CLAUDE.md](CLAUDE.md) (also symlinked as `AGENTS.md`) — commands, layout, non-obvious rules |
-| **Setting up or operating a deployment** | The sections below on this page |
+- **Review runs:** stores reviewer models, timings, statuses, human/agent-assigned
+  scores, finding counts, and optionally prompts and raw reviewer output.
+- **Friction reports:** stores a problem summary, details, suggested fix, project,
+  harness, and automatically collected workspace context.
+- **Triage:** filtered JSON listings, full-record retrieval, and batch
+  processed/unprocessed marking. Stored submission content is immutable.
+- **Delivery:** the companion client spools failed writes locally and retries on
+  later submit/flush calls. A queued write is not yet a successful delivery.
+- **Operations:** API-key authentication, automatic database migrations,
+  health/readiness probes, Prometheus metrics, and optional OpenTelemetry traces.
 
-Client integration in three lines: the operator sets `AGENT_FEEDBACK_URL` and
-`AGENT_FEEDBACK_API_KEY` on the submitting machine; every `/api/v1/*` call sends
-the key (`Authorization: Bearer` or `X-Api-Key`); payload shapes, idempotent
-retry semantics, and copy-pasteable recipes are all in
-[docs/agent-usage.md](docs/agent-usage.md).
+This repository **does not run model reviews, grade findings, fix reported
+problems, or provide a dashboard or automated feedback processor**. Review
+runners and triage workflows are separate integrations. You can use the API
+without any particular agent harness or model provider.
 
-## API
+Scores and valid/invalid finding counts are supplied by the producer, not
+independently verified here. Treat them as attributed observations, not an
+objective model benchmark: prompts, reviewer versions, grading rubrics, and
+selection of runs all affect comparisons.
 
-Endpoints: `POST /api/v1/reviews`, `POST /api/v1/frictions`,
-`GET /api/v1/submissions` (filtered list), `GET /api/v1/submissions/{id}`,
-`POST /api/v1/submissions/processed` (batch mark/unmark by the feedback processor).
-Unauthenticated: `/health` (liveness), `/ready` (readiness incl. Postgres ping),
-`/metrics` (Prometheus).
+**Deployment boundary:** this is a single-trust-domain service, not a public
+multi-tenant SaaS. Publishing the source does not make the HTTP service safe to
+expose directly to the internet. Read [Security and privacy](#security-and-privacy)
+before sending real telemetry.
 
-The contract — request/response schemas per field, error bodies, status codes,
-idempotency, curl examples — lives in **[docs/agent-usage.md](docs/agent-usage.md)**
-and nowhere else; code, that document, and the e2e suite are kept in lockstep
-(see [CLAUDE.md](CLAUDE.md)).
+## Quick start: disposable local stack
 
-## Layout
+Requires Git, Docker with Compose **2.24.4 or newer**, Bash, `curl`, and `openssl`.
+Run from a checkout of this repository. The current Dockerfile targets
+**Linux/amd64**; other architectures need emulation or a Dockerfile change.
 
-```
-agent-feedback/
-├── CLAUDE.md / AGENTS.md              # Agent guide for working in this repo
-├── backend/                           # Go module root
-│   ├── pkg/                           # Shared packages (postgres pool, envutil, httputil, observability)
-│   └── services/feedback/             # The service
-│       ├── cmd/feedback/main.go       # Entry point: config, DI, router, graceful shutdown
-│       ├── core/                      # Business logic: validation, idempotent create, list/get
-│       ├── handler/                   # HTTP transport: auth middleware, DTOs, error mapping
-│       ├── storage/postgres/          # sqlc queries, embedded migrations, DB client
-│       ├── Dockerfile
-│       ├── justfile
-│       └── .env.example
-├── infra/agent-feedback/              # docker-compose stack (postgres + feedback)
-├── scripts/e2e.sh                     # End-to-end contract suite (all endpoints)
-├── skills/agent-feedback/             # Canonical companion skill (SKILL.md + client scripts; see its Installation section)
-├── tests/skill/                       # Hermetic tests for the skill scripts (repo-only, never distributed)
-└── docs/
-    ├── agent-usage.md                 # API contract for producer agents (start here for integration)
-    ├── architecture.md                # Layer model, module strategy (template docs)
-    ├── patterns.md                    # Pattern reference (template docs)
-    ├── adding-a-service.md            # How this service was bootstrapped (template docs)
-    └── conventions.md                 # Naming, imports, errors, logging, testing rules
-```
-
-The repo was bootstrapped from a Go monorepo template (chi + pgx/v5 + sqlc,
-4-layer architecture, config-from-env, graceful shutdown); the template docs
-under `docs/` apply as-is to `backend/services/feedback`.
-
-## Set up and run
-
-### Locally (development)
-
-Requires Go 1.26, `just`, `sqlc`, and a Postgres instance.
-
-```bash
-cd backend/services/feedback
-cp .env.example .env   # set POSTGRES_URL and API_KEY
-just run-local
-curl http://localhost:8080/health
-```
-
-Migrations run automatically on startup. Useful recipes (from
-`backend/services/feedback/`): `just check` (pre-commit gate: fmt, vet,
-sqlc-vet, tidy, build), `just test`, `just sqlc-generate`, `just docker-build`.
-
-### As a compose stack
+The commands below build from source, generate local credentials, and override
+the shipped all-interface port mapping with a loopback-only mapping. Use a fresh
+checkout; **do not overwrite an existing deployment's `.env`**.
 
 ```bash
 cd infra/agent-feedback
-cp .env.example .env   # set API_KEY and POSTGRES_PASSWORD (mirror it into POSTGRES_URL)
-docker compose up -d
+# Stop here if .env already exists; use that deployment's configuration instead.
+test ! -e .env || { echo '.env already exists; refusing to overwrite' >&2; exit 1; }
+umask 077
+API_KEY=$(openssl rand -hex 32)
+POSTGRES_PASSWORD=$(openssl rand -hex 32)
+printf 'API_KEY=%s\nPOSTGRES_PASSWORD=%s\nPOSTGRES_URL=postgres://feedback:%s@postgres:5432/feedback?sslmode=disable\nENV_MODE=prod\n' \
+  "$API_KEY" "$POSTGRES_PASSWORD" "$POSTGRES_PASSWORD" > .env
+cat > compose.local.yaml <<'YAML'
+services:
+  feedback:
+    ports: !override
+      - "127.0.0.1:8090:8080"
+YAML
+docker compose -p agent-feedback-demo -f docker-compose.yml -f compose.local.yaml up -d --build --wait
+curl --fail --silent --show-error --retry 10 --retry-connrefused \
+  --retry-delay 1 --max-time 5 http://127.0.0.1:8090/ready
 ```
 
-The service listens on host port `8090` (`8090:8080`); Postgres stays inside the
-compose network. Migrations run on container startup — `docker compose up` is the
-whole deploy.
+PostgreSQL is accessible only inside the Compose network. Migrations run on
+service startup; data lives in a named Docker volume. Keep `.env` private and do
+not commit the generated `compose.local.yaml` (it is a local setup artifact).
 
-## CI
+### Send and retrieve a report
 
-`.github/workflows/ci.yml` runs on every push and PR: `go vet`, build, and the
-full test suite with a real Postgres service container (integration tests run,
-they don't skip). On pushes to `main` it additionally builds the service image
-and pushes it to GitHub Container Registry as
-`ghcr.io/foae/agent-feedback:latest` and `:<commit-sha>`. The image is private
-(same visibility as the repo).
-
-## Deploy to production (deploy-host)
-
-Production runs on the `deploy-host` machine (Intel Mac, Docker Desktop, reachable
-over Tailscale) as a compose stack: `postgres` + the GHCR-built service image,
-service on port `8090`. Deploys are **manual**, from this repo:
+In the same shell (where `API_KEY` is still set):
 
 ```bash
-scripts/deploy.sh            # deploy :latest (most recent main build)
-scripts/deploy.sh <sha>      # deploy a specific CI-built commit
+export AGENT_FEEDBACK_URL=http://127.0.0.1:8090
+export AGENT_FEEDBACK_API_KEY="$API_KEY"
+curl --fail --silent --show-error "$AGENT_FEEDBACK_URL/api/v1/frictions" \
+  -H "Authorization: Bearer $AGENT_FEEDBACK_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"machine_name":"demo","coordinator_model":"manual-example","category":"documentation","summary":"Example feedback report"}'
+curl --fail --silent --show-error \
+  "$AGENT_FEEDBACK_URL/api/v1/submissions?type=friction&processed=false" \
+  -H "Authorization: Bearer $AGENT_FEEDBACK_API_KEY"
 ```
 
-The script fetches the image from GHCR into a tarball with `crane` (your `gh`
-auth; deploy-host holds no registry credentials), streams it over SSH into
-`docker load`, syncs
-`infra/agent-feedback/docker-compose.deploy.yml` to `~/agent-feedback/` on
-deploy-host, generates credentials into `~/agent-feedback/.env` on first deploy
-(preserved on every later deploy), runs `docker compose up -d`, and verifies
-`/ready` (which includes a Postgres ping — a deploy with a dead database fails
-the check instead of reporting healthy).
-Local prerequisites: `gh` (authed), `docker`, `crane` (`brew install crane`) —
-crane is used instead of `docker save` because docker's containerd image store
-can emit truncated save tars (see the script header).
-The API key lives only in that remote `.env`. Typical flow: merge/push to `main`
-→ wait for CI to publish the image → run the script.
+A new report returns `201` with its ID; the list returns submission summaries.
+Fetch `/api/v1/submissions/<id>` for its full payload. Mark work processed with
+`POST /api/v1/submissions/processed`, body `{"ids":[<id>],"processed":true}`.
+The complete schemas, limits, filters, and error responses are in the
+[API contract](docs/agent-usage.md).
 
-## Verification
+To stop this **disposable demo** and delete its database, from
+`infra/agent-feedback/`:
 
 ```bash
-bash scripts/e2e.sh <API_KEY> [BASE_URL]   # BASE_URL defaults to http://127.0.0.1:8090
+docker compose -p agent-feedback-demo -f docker-compose.yml -f compose.local.yaml down -v
+rm compose.local.yaml
 ```
 
-Exercises every endpoint against a live deployment: auth failures, create,
-identical replay, replay-mismatch 409, friction duplicate absorption, validation
-errors (bad values, unknown fields, length caps, oversized bodies), list filters
-incl. `processed`, processed mark/unmark, get-by-id. Safe to rerun against a
-persistent database (unique ids per run); it creates test submissions — clean up
-with `docker compose down -v` (or delete the rows) afterwards.
+**`down -v` permanently deletes the stack's database volume. Never use it to
+clean test rows out of a real deployment.** The `.env` file remains private local
+configuration; stopping the stack does not remove it.
 
-The companion skill has its own hermetic suite (no stack needed):
+## Companion skill
+
+The canonical skill is [`skills/agent-feedback/`](skills/agent-feedback/SKILL.md).
+It needs Bash, `curl`, and `jq`; Git and platform utilities support automatic
+context and harness detection. Copy that directory into your harness's skill
+location (for example `~/.claude/skills/agent-feedback/`), or run its scripts
+directly. Do not distribute `tests/skill/` with the skill.
+
+**Set both `AGENT_FEEDBACK_URL` and `AGENT_FEEDBACK_API_KEY` to your own service.**
+API calls fail locally if either is missing; there is no default hosted endpoint.
+Set `AGENT_FEEDBACK_MACHINE` to a non-identifying label and pass `--model`
+explicitly for reliable attribution.
+
+From the repository root, after setting those environment variables:
 
 ```bash
-bash tests/skill/run-tests.sh
+bash skills/agent-feedback/scripts/submit-friction.sh \
+  --category documentation --summary 'Example feedback report' \
+  --model manual-example --dry-run
+# Inspect the printed payload before sending; --dry-run performs no request.
+# Remove --dry-run to submit it, including the collected context.
+bash skills/agent-feedback/scripts/query.sh --type friction --processed false
+bash skills/agent-feedback/scripts/process.sh list
+# bash skills/agent-feedback/scripts/process.sh done <id>
 ```
+
+`submit-review.sh` consumes an external runner's `meta.json`, `summary.tsv`, and
+scorecard ledger; an arbitrary directory of model output is not sufficient.
+See the [run-directory contract](docs/agent-usage.md#building-a-review-payload-from-a-run-directory).
+Prompts and raw outputs are omitted by default; `--include-outputs` opts in.
+Choose that before first submission: later content changes under the same
+review key return `409`, not an update.
+
+## Security and privacy
+
+- **One shared key grants all API access:** submit, read every record, and mark or
+  unmark records. There are no per-user permissions, tenant isolation, or
+  per-client revocation. Rotate by changing the server's `API_KEY`, recreating
+  the service, and updating every producer's `AGENT_FEEDBACK_API_KEY`; there is
+  no overlapping-key rotation mechanism.
+- **HTTP is unencrypted.** Use loopback for local work; for remote use, deploy
+  behind authenticated network access and TLS termination or an encrypted
+  private network. The shipped Compose files otherwise publish port 8090 on
+  all host interfaces. Restrict ingress explicitly.
+- `/health`, `/ready`, and `/metrics` are unauthenticated. Do not expose
+  operational endpoints to untrusted networks. There is no application rate
+  limiting; enforce request size, timeouts, and rate limits at a trusted proxy.
+- **Friction context is collected automatically:** hostname/machine label,
+  working directory, repository root and remote, branch/commit/dirty state,
+  OS/architecture, and available session/harness/profile metadata. This can
+  disclose usernames, private repository names, and internal infrastructure.
+  There is no general context opt-out. Preview with `--dry-run`; use a minimal
+  direct API payload if you do not want automatic context collection.
+- Remote URL sanitization strips conventional URL userinfo, **not every possible
+  credential encoding** (for example query-string tokens). Do not put secrets
+  in report prose, repository URLs, prompts, raw outputs, or reviewer notes.
+  The server does not redact submitted content.
+- Data is retained until an operator removes it from PostgreSQL. **Processed
+  does not mean deleted.** There is no retention scheduler, deletion API, or
+  backup automation. Set a retention policy, protect database/backups, and test
+  restoration before using real data. Take a backup before upgrading; schema
+  migrations run automatically and rolling back the image does not undo them.
+- Client payloads also exist in local cache/spool files under
+  `~/.cache/agent-feedback/`. Protect the account and cache permissions. Pending
+  reviews age out after about 30 days and frictions after about 20 hours;
+  rejected files are retained for inspection. Retries require another client
+  invocation; there is no background delivery daemon.
+- Treat stored prompts, outputs, and suggested fixes as **untrusted text**, not
+  instructions for a consuming agent to execute automatically.
+
+### Current correctness limits
+
+Review replay is keyed by `(skill, run_id)`: identical content returns the
+existing row, changed content returns `409`. Friction duplicate absorption uses
+a 24-hour content-hash window and excludes context, but is **best-effort under
+concurrency**: simultaneous identical requests can create multiple rows.
+
+POST handlers reject unknown fields in the first JSON value, but currently do
+not reject a trailing second JSON value or consistently enforce the whole-body
+10 MiB limit after that first value. Do not rely on these boundaries without a
+trusted proxy enforcing total body size. These are known gaps in the stronger
+wording of the API contract, not promises of strict whole-body validation.
+
+## Development and verification
+
+Requires Go matching [`backend/go.mod`](backend/go.mod) (currently 1.26), `just`,
+`sqlc`, and PostgreSQL. The container setup uses PostgreSQL 18.
+
+```bash
+cd backend/services/feedback
+cp .env.example .env
+# Edit .env: set POSTGRES_URL and a strong API_KEY; use a development database.
+# For local-only access also set HTTP_LISTEN_ADDR=127.0.0.1:8080.
+just run-local
+```
+
+`just run-local` stays in the foreground. From another terminal, query
+`http://127.0.0.1:8080/ready`. From the service directory, `just check` runs fmt,
+vet, sqlc vet/compile, module tidy, and build; it can modify generated formatting
+and module metadata. `just sqlc-generate` regenerates SQL bindings.
+
+From the repository root:
+
+```bash
+bash tests/skill/run-tests.sh  # Hermetic client tests; also requires python3.
+# Use a separate disposable PostgreSQL database, never production:
+(cd backend && TEST_POSTGRES_URL='<test database connection URL>' go test -race -count=1 ./...)
+# Against a disposable running service; creates persistent test records:
+bash scripts/e2e.sh "$AGENT_FEEDBACK_API_KEY" "$AGENT_FEEDBACK_URL"
+```
+
+Integration tests skip when `TEST_POSTGRES_URL` is absent. CI runs vet, build,
+the Go suite with a real PostgreSQL service, and the skill tests. It does not
+currently enforce every `just check` step or run the live HTTP e2e suite. Pushes
+to `main` also publish `ghcr.io/<repository-owner>/<repository-name>` images
+tagged `latest` and the commit SHA. Registry package visibility is managed
+separately; do not assume repository publication changes it.
+
+## Project map and contribution guidance
+
+| Path | Purpose |
+|---|---|
+| `backend/services/feedback/cmd/feedback/` | Configuration, wiring, routing, shutdown |
+| `backend/services/feedback/core/` | Validation, hashing, create/query/process behavior |
+| `backend/services/feedback/handler/` | HTTP DTOs, authentication, error mapping |
+| `backend/services/feedback/storage/postgres/` | Queries, append-only migrations, generated sqlc bindings |
+| `backend/pkg/` | Shared database, HTTP metrics, tracing, environment helpers |
+| `infra/agent-feedback/` | Local build-based and maintainer image-based Compose stacks |
+| `skills/agent-feedback/` | Distributed companion client skill |
+| `tests/skill/`, `scripts/e2e.sh` | Client and live-contract verification |
+
+For service changes, read [the contributor/agent guide](CLAUDE.md) and
+[conventions](docs/conventions.md). Keep API code, [API documentation](docs/agent-usage.md),
+`scripts/e2e.sh`, and the client skill in sync. Edit SQL inputs and regenerate
+sqlc code; never hand-edit generated bindings or deployed migrations.
+
+The architecture/patterns/adding-a-service documents retain template material;
+references to `services/example/` are not runnable instructions in this checkout.
+
+## SSH deployment
+
+`scripts/deploy.sh [image-tag]` streams a GHCR image over SSH, installs the
+image-based Compose file, preserves existing credentials, and checks readiness.
+It requires authenticated `gh`, `crane`, Docker CLI, SSH, and SCP locally;
+Docker Compose and `curl` must be available on the remote host.
+
+Set `DEPLOY_REMOTE` to your SSH destination and `DEPLOY_IMAGE` to your GHCR image
+repository (without a tag). Both are required. For local-only defaults, store
+these shell assignments in `.private/deploy.env`, which the script loads:
+
+```bash
+DEPLOY_REMOTE=deploy@example.invalid
+DEPLOY_IMAGE=ghcr.io/example-owner/agent-feedback
+```
+
+Use your own values, protect the file with `chmod 600`, then run
+`bash scripts/deploy.sh <image-tag>`. The default tag is `latest`. Deployment
+uses `~/agent-feedback` on the remote host; its `.env` contains generated
+credentials. The script sets `FEEDBACK_IMAGE` for Compose explicitly; manual
+Compose invocations must set it too.
+
+The deployment stack exposes port 8090 over HTTP. Restrict access to a trusted
+network or provide an authenticated TLS boundary before exposing it externally.
+This script does not provide automatic rollback or database backups.
+
+`.private/` is gitignored and intended for local deployment settings and recovery
+bundles. These files may contain sensitive historical data: keep the directory
+owner-only (`chmod 700 .private`) and never force-add it to Git.
+
+## Licensing and reporting
+
+**A repository-wide license has not yet been selected and added.** The companion
+skill's metadata says MIT, but that is not a clear license grant for the whole
+repository. Do not assume all repository content is MIT-licensed.
+
+A private vulnerability-reporting channel has not yet been documented. Do not
+post API keys, private telemetry, or exploit details containing sensitive data
+in public issues; arrange a private channel with the maintainer first.

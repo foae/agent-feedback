@@ -48,9 +48,22 @@ chk() { # chk <desc> <ok 0|1>
   else fail=$((fail+1)); echo "FAIL  $1"; fi
 }
 set_mode() { printf '%s' "$1" >"$STATE/mode"; }
-log_len() { wc -l <"$STATE/requests.jsonl" 2>/dev/null | tr -d ' ' || echo 0; }
+log_len() {
+  if [ -f "$STATE/requests.jsonl" ]; then
+    wc -l <"$STATE/requests.jsonl" | tr -d ' '
+  else
+    echo 0
+  fi
+}
 last_req() { tail -n1 "$STATE/requests.jsonl"; }
 outcome() { tail -n1 <<<"$1"; }
+
+# A missing endpoint must fail locally, without sending to a default service.
+before=$(log_len)
+env -u AGENT_FEEDBACK_URL bash "$SCRIPTS/query.sh" --type friction >/dev/null 2>&1
+rc=$?
+chk "missing endpoint rejects locally without requests" \
+  "$([ "$rc" -ne 0 ] && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
 
 # ── submit-friction.sh ───────────────────────────────────────────────────────
 

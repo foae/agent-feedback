@@ -1,8 +1,7 @@
-# Image-based deployment stack (no build context) — used by scripts/deploy.sh,
-# which copies this file to the target host as docker-compose.yml. The image is
-# streamed to the host by the deploy script (docker save | ssh docker load), so the
-# host needs no GHCR credentials. IMAGE_TAG is set by the deploy script; defaults
-# to latest for manual `docker compose up` on the host.
+# Image-based deployment stack — installed by scripts/deploy.sh over SSH.
+# The script streams the image with crane and docker load; the target needs no
+# registry credentials. Set FEEDBACK_IMAGE to a full image reference, including
+# its tag, for both scripted and manual Compose operations.
 services:
   postgres:
     image: postgres:18-alpine
@@ -20,7 +19,7 @@ services:
       retries: 10
 
   feedback:
-    image: ghcr.io/foae/agent-feedback:${IMAGE_TAG:-latest}
+    image: ${FEEDBACK_IMAGE:?Set FEEDBACK_IMAGE to your full image reference}
     restart: unless-stopped
     ports:
       - "8090:8080"

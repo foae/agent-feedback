@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Shared helpers for the agent-feedback skill scripts. SOURCED, not executed.
 #
-# Env contract (only the key is per-machine state):
-#   AGENT_FEEDBACK_URL         optional — defaults to the production service
+# Env contract (endpoint and key are operator-managed):
+#   AGENT_FEEDBACK_URL         required for every /api/v1/* call; no default
 #   AGENT_FEEDBACK_API_KEY     required for every /api/v1/* call
 #   AGENT_FEEDBACK_MACHINE     optional — canonical machine name; falls back to
 #                              `hostname -s`. Set it where the hostname is not
@@ -26,7 +26,7 @@
 #               dedupes — so no per-type retry ceremony remains.
 #   *.rejected  got a 4xx/409 back — a payload/content bug, kept for inspection.
 
-AF_URL="${AGENT_FEEDBACK_URL:?Set AGENT_FEEDBACK_URL to your service endpoint}"
+AF_URL="${AGENT_FEEDBACK_URL:-}"
 AF_KEY="${AGENT_FEEDBACK_API_KEY:-}"
 AF_CACHE="$HOME/.cache/agent-feedback"
 AF_SPOOL="$AF_CACHE/spool"
@@ -50,6 +50,7 @@ af_require_deps() {
 }
 
 af_require_key() {
+  [ -n "$AF_URL" ] || af_die "AGENT_FEEDBACK_URL is not set — configure your service endpoint"
   [ -n "$AF_KEY" ] && return 0
   af_die "AGENT_FEEDBACK_API_KEY is not set — export it in your shell profile (ask the operator for the key)"
 }

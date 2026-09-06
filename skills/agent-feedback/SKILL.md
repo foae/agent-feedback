@@ -2,7 +2,7 @@
 name: agent-feedback
 description: Submit and query centralized agent telemetry — multi-model review timings/scorecards and friction reports — against the agent-feedback service (Go/Postgres). Use when submitting a friction report per the system prompt's Surface Friction directive, when querying review/friction data, or when processing submissions (list unprocessed, mark done). Review runs normally submit themselves — score-review.sh auto-submits when the last reviewer is scored.
 license: MIT
-compatibility: Any harness that can run bash. Requires curl + jq and AGENT_FEEDBACK_API_KEY in the environment.
+compatibility: Any harness that can run bash. Requires curl + jq and AGENT_FEEDBACK_URL + AGENT_FEEDBACK_API_KEY in the environment.
 metadata:
   author: foae
   version: "2.1"
@@ -40,7 +40,7 @@ Fleet-wide sync/distribution of this skill is handled outside this repo.
 
 ```
 AGENT_FEEDBACK_API_KEY      required for every call (ask the operator)
-AGENT_FEEDBACK_URL          optional — defaults to the production service
+AGENT_FEEDBACK_URL          required for API calls — your service endpoint; no default
 AGENT_FEEDBACK_MACHINE      optional — canonical machine name; defaults to `hostname -s`.
                             Set it where the hostname is not the canonical name.
 AGENT_FEEDBACK_HARNESS      optional — overrides harness auto-detection
