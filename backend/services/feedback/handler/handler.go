@@ -7,14 +7,10 @@ import (
 // Handler is the HTTP transport layer. It extracts request parameters,
 // calls core methods, and writes HTTP responses.
 type Handler struct {
-	svc     *core.Service
-	envMode string
+	svc *core.Service
 }
 
 // New creates a new Handler.
-func New(svc *core.Service, envMode string) *Handler {
-	return &Handler{
-		svc:     svc,
-		envMode: envMode,
-	}
+func New(svc *core.Service) *Handler {
+	return &Handler{svc: svc}
 }

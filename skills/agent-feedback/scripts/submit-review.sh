@@ -25,17 +25,17 @@
 #   {"status":"mismatch","run_id":"...","message":"..."}   (409 — content differs)
 #   {"status":"collision","run_id":"..."}          (server returned another record)
 #   {"status":"rejected","run_id":"...","http_status":N,"message":"..."}
-# Direct mode exits 1 on rejected/mismatch/collision; sweep always exits 0.
+# Direct mode exits 1 on rejected/mismatch/collision or an unsafe incomplete
+# scorecard; sweep always exits 0.
 #
 # --sweep (single instance per machine, mkdir lock):
 #   1. flush the spool;
-#   2. submit every run dir that is FULLY SCORED (zero PENDING rows for its
-#      run_ts) but has no .submitted marker — the recovery path for
+#   2. submit every old run dir whose completed reviewers have exactly one
+#      numeric grade and no .submitted marker — the recovery path for
 #      auto-submits that failed or died.
-#   Sweep NEVER submits a run with PENDING rows: the 12h scoring grace is a
-#   heuristic, a session can legitimately score at hour 13, and a score-less
-#   submission would permanently occupy the write-once (skill, run_id) key.
-#   Abandoned runs stay local-only (timings.tsv keeps their timings).
+#   Sweep NEVER submits an incomplete scorecard: a score-less submission would
+#   permanently occupy the write-once (skill, run_id) key. Abandoned runs stay
+#   local-only (timings.tsv keeps their timings).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,16 +43,32 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/_common.sh"
 
 SWEEP_LOCK="$AF_CACHE/sweep.lock"
-SWEEP_LOCK_STALE_SECS=600
+SWEEP_LOCK_STALE_SECS="${SWEEP_LOCK_STALE_SECS:-600}"
 # Sweep ignores run dirs younger than this: fresh runs are the auto-submit
 # hook's job, and a sibling runner mid-run has a dir whose summary.tsv holds
 # only the header — submitting that would 400 on the empty reviewers array.
-SWEEP_MIN_AGE_HOURS=2
+SWEEP_MIN_AGE_HOURS="${SWEEP_MIN_AGE_HOURS:-2}"
 
 usage() {
   echo "usage: submit-review.sh <run_dir> [--include-outputs]" >&2
   echo "       submit-review.sh --sweep" >&2
   exit 1
+}
+
+# scorecard_timestamp_ambiguous <run-dir> <run-ts> — scorecards.tsv predates
+# per-run identifiers, so matching timestamp siblings have indistinguishable rows.
+scorecard_timestamp_ambiguous() {
+  local run_dir="$1" run_ts="$2" base self peer peer_ts
+  base=$(cd "$(dirname "$run_dir")" && pwd)
+  self=$(basename "$run_dir")
+  for peer in "$base"/*; do
+    [ -d "$peer" ] || continue
+    [ "$(basename "$peer")" = "$self" ] && continue
+    [ -f "$peer/meta.json" ] || continue
+    peer_ts=$(jq -r '.run_ts // empty' "$peer/meta.json" 2>/dev/null) || continue
+    [ "$peer_ts" = "$run_ts" ] && return 0
+  done
+  return 1
 }
 
 # ── Payload construction ─────────────────────────────────────────────────────
@@ -64,33 +80,46 @@ build_payload() {
   [ -f "$meta" ] || { af_warn "no meta.json in $run_dir (predates integration) — skipping"; return 1; }
   [ -s "$run_dir/summary.tsv" ] || { af_warn "no summary.tsv in $run_dir — skipping"; return 1; }
 
-  local machine skill run_ts run_id
+  local machine skill run_ts run_id coordinator
   machine=$(jq -r '.machine' "$meta")
   skill=$(jq -r '.skill' "$meta")
   run_ts=$(jq -r '.run_ts' "$meta")
   run_id="$machine-$(basename "$run_dir")"
 
-  # Coordinator attribution: a direct call may carry the live session's model;
-  # sweep must NOT stamp the sweeping session's env onto historical runs.
-  local coordinator
-  if [ "$mode" = direct ] && [ -n "${REVIEW_CALLER_MODEL:-}" ]; then
-    coordinator="$REVIEW_CALLER_MODEL"
-  else
-    coordinator=$(jq -r '.caller // "unknown"' "$meta")
+  # Attribution belongs to the run, not the later shell that retries it.
+  coordinator=$(jq -r '.caller // "unknown"' "$meta")
+
+  # Scorecards are timestamp-keyed by the external runner. Refuse to borrow
+  # rows when sibling run directories share a timestamp; their score rows
+  # cannot be assigned safely without changing that external protocol.
+  local ledger score_rows_json scores_json
+  ledger="$(dirname "$run_dir")/scorecards.tsv"
+  if [ -f "$ledger" ] && scorecard_timestamp_ambiguous "$run_dir" "$run_ts"; then
+    af_warn "multiple run directories share scorecard timestamp $run_ts — NOT submitting ambiguous run $run_id"
+    return 1
   fi
 
-  # Scorecard rows for this run_ts: label -> score/valid/invalid/note (skip
-  # PENDING). The label→slot join is exact, via meta.json's slot map.
-  local ledger scores_json
-  ledger="$(dirname "$run_dir")/scorecards.tsv"
-  scores_json="[]"
+  score_rows_json="[]"
   if [ -f "$ledger" ]; then
-    scores_json=$(awk -F'\t' -v ts="$run_ts" \
-      '$1 == ts && $4 != "PENDING" && $4 != "" { print }' "$ledger" \
-      | jq -Rs 'split("\n") | map(select(length > 0) | split("\t") |
-          {label: .[2], score: (.[3] | tonumber? ), valid: (.[4] | tonumber?),
-           invalid: (.[5] | tonumber?), note: .[6]})')
+    if ! score_rows_json=$(awk -F'\t' -v ts="$run_ts" '$1 == ts { print $0 }' "$ledger" \
+      | jq -Rsc '
+          def optional_number:
+            if . == null or . == "" then null else try tonumber catch null end;
+          split("\n")
+          | map(select(length > 0)
+                | capture("^(?<timestamp>[^\t]*)\t(?<source>[^\t]*)\t(?<label>[^\t]*)\t(?<score_text>[^\t]*)(?:\t(?<valid_text>[^\t]*))?(?:\t(?<invalid_text>[^\t]*))?(?:\t(?<note>.*))?$")
+                | .score_text as $score
+                | {label: .label,
+                   score: (if $score == "" or $score == "PENDING"
+                           then null else try ($score | tonumber) catch null end),
+                   valid: (.valid_text | optional_number),
+                   invalid: (.invalid_text | optional_number),
+                   note: (.note // "")})'); then
+      af_warn "could not parse scorecard ledger for $run_id — NOT submitting"
+      return 1
+    fi
   fi
+  scores_json=$(jq -c 'map(select(.score != null))' <<<"$score_rows_json")
 
   # Reviewers from summary.tsv (slot, model, status, duration_s, bytes).
   local reviewers_json="[]" slot model status dur bytes out_file output_arg
@@ -127,6 +156,26 @@ build_payload() {
   [ "$(jq 'length' <<<"$reviewers_json")" -gt 0 ] \
     || { af_warn "no reviewer rows in $run_dir/summary.tsv — nothing to submit"; return 1; }
 
+  # A completed reviewer must have exactly one numeric grade. Never claim the
+  # write-once run_id before the scorecard is complete enough to be trustworthy.
+  local incomplete
+  incomplete=$(jq -nr \
+    --argjson reviewers "$reviewers_json" --argjson rows "$score_rows_json" \
+    --slurpfile meta "$meta" '
+      [
+        $reviewers[]
+        | select(.status == "completed")
+        | .slot as $slot
+        | ($meta[0].slots[$slot].label // "") as $label
+        | ($rows | map(select(.label == $label))) as $grades
+        | select($label == "" or ($grades | length) != 1 or ($grades[0].score == null))
+        | if $label == "" then "\($slot) (no scorecard label)"
+          else "\($slot) (\($label))" end
+      ]
+      | join(", ")')
+  [ -z "$incomplete" ] \
+    || { af_warn "incomplete scorecard for completed reviewer(s) in $run_id: $incomplete — NOT submitting"; return 1; }
+
   local prompt_arg=null
   if [ "$include_outputs" = 1 ] && [ -s "$run_dir/prompt.md" ]; then
     prompt_arg=$(jq -Rs . <"$run_dir/prompt.md")
@@ -145,11 +194,15 @@ build_payload() {
 }
 
 # submit_run <run_dir> <include_outputs> <mode> — POST + outcome handling.
-# Returns 0 on submitted/duplicate/spooled/skipped, 1 on rejected/mismatch/collision.
+# Returns 0 on submitted/duplicate/spooled/skipped, 1 on rejected/mismatch,
+# collision, or an unsafe direct submission.
 submit_run() {
   local run_dir="$1" include_outputs="$2" mode="$3"
   local payload run_id rc=0
-  payload=$(build_payload "$run_dir" "$include_outputs" "$mode") || return 0
+  payload=$(build_payload "$run_dir" "$include_outputs" "$mode") || {
+    [ "$mode" = sweep ] && return 0
+    return 1
+  }
   run_id=$(jq -r '.run_id' "$payload")
 
   af_request POST "/api/v1/reviews" "$payload"
@@ -198,21 +251,72 @@ submit_run() {
 
 # ── Sweep ────────────────────────────────────────────────────────────────────
 
+sweep_lock_mtime() {
+  stat -c %Y "$SWEEP_LOCK" 2>/dev/null || stat -f %m "$SWEEP_LOCK" 2>/dev/null
+}
+
+sweep_lock_owner_live() {
+  local owner pid
+  owner=$(cat "$SWEEP_LOCK/owner" 2>/dev/null || true)
+  pid="${owner%%:*}"
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  [ "$owner" != "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+sweep_lock_is_stale() {
+  local born now mtime
+  now=$(date +%s)
+  born=$(cat "$SWEEP_LOCK/born" 2>/dev/null || true)
+  case "$born" in
+    *[!0-9]*|"") born="" ;;
+  esac
+  if [ -n "$born" ]; then
+    [ $((now - born)) -ge "$SWEEP_LOCK_STALE_SECS" ]
+    return
+  fi
+  # Old locks have no owner/born metadata. Their directory timestamp is the
+  # portable fallback; if it cannot be read, retain rather than risk eviction.
+  mtime=$(sweep_lock_mtime) || return 1
+  case "$mtime" in *[!0-9]*|"") return 1 ;; esac
+  [ $((now - mtime)) -ge "$SWEEP_LOCK_STALE_SECS" ]
+}
+
+sweep_lock_release() {
+  local owner
+  owner=$(cat "$SWEEP_LOCK/owner" 2>/dev/null || true)
+  [ "$owner" = "${SWEEP_OWNER:-}" ] || return 0
+  rm -f "$SWEEP_LOCK/born" "$SWEEP_LOCK/owner"
+  rmdir "$SWEEP_LOCK" 2>/dev/null || true
+}
+
+sweep_lock_acquire() {
+  local now
+  if ! mkdir "$SWEEP_LOCK" 2>/dev/null; then
+    # A valid, live owner wins even when its born timestamp is old. This
+    # prevents a slow sweep from being evicted solely on elapsed time.
+    sweep_lock_owner_live && return 1
+    sweep_lock_is_stale || return 1
+    # Recheck immediately before removal in case metadata arrived while the
+    # first check was reading an acquiring owner's directory.
+    sweep_lock_owner_live && return 1
+    rm -rf "$SWEEP_LOCK" 2>/dev/null || return 1
+    mkdir "$SWEEP_LOCK" 2>/dev/null || return 1
+  fi
+  now=$(date +%s)
+  SWEEP_OWNER="$$:$now:$RANDOM"
+  if ! printf '%s\n' "$SWEEP_OWNER" >"$SWEEP_LOCK/owner" \
+    || ! printf '%s\n' "$now" >"$SWEEP_LOCK/born"; then
+    sweep_lock_release
+    return 1
+  fi
+  return 0
+}
+
 sweep() {
   mkdir -p "$AF_CACHE"
-  if ! mkdir "$SWEEP_LOCK" 2>/dev/null; then
-    local born now
-    born=$(cat "$SWEEP_LOCK/born" 2>/dev/null || echo 0)
-    case "$born" in ""|*[!0-9]*) born=0 ;; esac
-    now=$(date +%s)
-    if [ "$born" -gt 0 ] && [ $((now - born)) -ge "$SWEEP_LOCK_STALE_SECS" ]; then
-      rm -rf "$SWEEP_LOCK"; mkdir "$SWEEP_LOCK" 2>/dev/null || exit 0
-    else
-      exit 0   # another sweep is live — this one is redundant
-    fi
-  fi
-  date +%s >"$SWEEP_LOCK/born" 2>/dev/null || true
-  trap 'rm -rf "$SWEEP_LOCK"' EXIT
+  sweep_lock_acquire || return 0   # another live/fresh sweep is redundant
+  trap 'sweep_lock_release' EXIT
 
   af_flush_spool
 
@@ -220,7 +324,7 @@ sweep() {
   cutoff=$(date -d "$SWEEP_MIN_AGE_HOURS hours ago" +%Y%m%d-%H%M%S 2>/dev/null \
     || date -v-"${SWEEP_MIN_AGE_HOURS}"H +%Y%m%d-%H%M%S 2>/dev/null || echo "")
 
-  local base run_dir run_ts pending
+  local base run_dir run_ts
   for base in "${REVIEW_LOG_DIR:-$HOME/.cache/multi-llm-review}" "$HOME/.cache/second-opinion"; do
     [ -d "$base" ] || continue
     for run_dir in "$base"/*/; do
@@ -230,10 +334,6 @@ sweep() {
       run_ts=$(jq -r '.run_ts' "$run_dir/meta.json")
       # run_ts is fixed-width zero-padded: string compare IS chronological.
       [ -n "$cutoff" ] && [ "$run_ts" \> "$cutoff" ] && continue
-      pending=0
-      [ -f "$base/scorecards.tsv" ] && pending=$(awk -F'\t' -v ts="$run_ts" \
-        '$1 == ts && $4 == "PENDING" { n++ } END { print n + 0 }' "$base/scorecards.tsv")
-      [ "$pending" -eq 0 ] || continue   # never submit a run with PENDING rows
       submit_run "$run_dir" 0 sweep || true   # sweep is best-effort; outcomes are printed per run
     done
   done

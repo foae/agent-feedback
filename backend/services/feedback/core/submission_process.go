@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+
+	"github.com/jackc/pgx/v5"
 )
 
 const maxProcessedIDs = 500
@@ -46,44 +48,54 @@ func (s *Service) SetProcessed(ctx context.Context, in SetProcessedInput) (SetPr
 		}
 	}
 
-	var updated []int64
-	var err error
-	if in.Processed {
-		updated, err = s.db.Queries().MarkSubmissionsProcessed(ctx, ids)
-	} else {
-		updated, err = s.db.Queries().UnmarkSubmissionsProcessed(ctx, ids)
-	}
+	tx, err := s.db.DB().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
-		return SetProcessedResult{}, fmt.Errorf("set processed: %w", err)
+		return SetProcessedResult{}, fmt.Errorf("begin set processed: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	queries := s.db.WithTx(tx).Queries()
+	locked, err := queries.LockSubmissionProcessingStates(ctx, ids)
+	if err != nil {
+		return SetProcessedResult{}, fmt.Errorf("lock submission processing states: %w", err)
 	}
 
-	existing, err := s.db.Queries().GetExistingSubmissionIDs(ctx, ids)
-	if err != nil {
-		return SetProcessedResult{}, fmt.Errorf("resolve submission ids: %w", err)
-	}
-
-	updatedSet := make(map[int64]struct{}, len(updated))
-	for _, id := range updated {
-		updatedSet[id] = struct{}{}
-	}
-	existingSet := make(map[int64]struct{}, len(existing))
-	for _, id := range existing {
-		existingSet[id] = struct{}{}
+	existing := make(map[int64]bool, len(locked))
+	for _, row := range locked {
+		existing[row.ID] = row.ProcessedAt.Valid
 	}
 
 	// Empty slices, not nil: the handler marshals these directly and the
 	// contract promises [] over null.
 	res := SetProcessedResult{Updated: []int64{}, Unchanged: []int64{}, NotFound: []int64{}}
 	for _, id := range ids {
+		processed, found := existing[id]
 		switch {
-		case contains(updatedSet, id):
-			res.Updated = append(res.Updated, id)
-		case contains(existingSet, id):
+		case !found:
+			res.NotFound = append(res.NotFound, id)
+		case processed == in.Processed:
 			res.Unchanged = append(res.Unchanged, id)
 		default:
-			res.NotFound = append(res.NotFound, id)
+			res.Updated = append(res.Updated, id)
 		}
 	}
+
+	if len(res.Updated) > 0 {
+		var err error
+		if in.Processed {
+			_, err = queries.MarkSubmissionsProcessed(ctx, res.Updated)
+		} else {
+			_, err = queries.UnmarkSubmissionsProcessed(ctx, res.Updated)
+		}
+		if err != nil {
+			return SetProcessedResult{}, fmt.Errorf("set processed: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return SetProcessedResult{}, fmt.Errorf("commit set processed: %w", err)
+	}
+
 	slices.Sort(res.Updated)
 	slices.Sort(res.Unchanged)
 	slices.Sort(res.NotFound)
@@ -94,9 +106,4 @@ func (s *Service) SetProcessed(ctx context.Context, in SetProcessedInput) (SetPr
 	}
 
 	return res, nil
-}
-
-func contains(set map[int64]struct{}, id int64) bool {
-	_, ok := set[id]
-	return ok
 }

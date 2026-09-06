@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	sharedpg "agent-feedback/backend/pkg/postgres"
@@ -29,7 +27,7 @@ type Client struct {
 	pgx *pgxpool.Pool
 }
 
-func runMigrations(cfgURL string) error {
+func runMigrations(cfgURL string) (retErr error) {
 	d, err := iofs.New(migrationFiles, "migrations")
 	if err != nil {
 		return fmt.Errorf("pg: unable to create migration driver: %w", err)
@@ -37,8 +35,23 @@ func runMigrations(cfgURL string) error {
 
 	m, err := migrate.NewWithSourceInstance("iofs", d, cfgURL)
 	if err != nil {
-		return fmt.Errorf("pg: unable to create migration instance: %w", err)
+		migrationErr := fmt.Errorf("pg: unable to create migration instance: %w", err)
+		if closeErr := d.Close(); closeErr != nil {
+			return errors.Join(migrationErr, fmt.Errorf("pg: unable to close migration source: %w", closeErr))
+		}
+		return migrationErr
 	}
+	defer func() {
+		sourceErr, databaseErr := m.Close()
+		if closeErr := errors.Join(sourceErr, databaseErr); closeErr != nil {
+			closeErr = fmt.Errorf("pg: unable to close migration drivers: %w", closeErr)
+			if retErr == nil {
+				retErr = closeErr
+			} else {
+				retErr = errors.Join(retErr, closeErr)
+			}
+		}
+	}()
 
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("pg: unable to run migrations: %w", err)
@@ -55,24 +68,24 @@ func New(cfgURL string, minConns int, maxConns int, shouldRunMigrations bool) (*
 	}
 
 	if err := p.Pool().Ping(context.Background()); err != nil {
+		p.Close()
 		return nil, fmt.Errorf("pg: unable to ping postgres: %w", err)
 	}
 
 	if shouldRunMigrations {
 		slog.Info("pg: running database migrations")
 		if err := runMigrations(cfgURL); err != nil {
+			p.Close()
 			return nil, fmt.Errorf("pg: migration failed: %w", err)
 		}
 		slog.Info("pg: migrations completed successfully")
 	}
 
-	scWrap := &SqlcWrapper{pgx: p.Pool()}
-	sc := sqlc.New(scWrap)
-
+	pool := p.Pool()
 	return &Client{
 		cl:  p,
-		sql: sc,
-		pgx: scWrap.pgx,
+		sql: sqlc.New(pool),
+		pgx: pool,
 	}, nil
 }
 
@@ -94,25 +107,4 @@ func (c *Client) WithTx(tx pgx.Tx) *Client {
 
 func (c *Client) Close() {
 	c.cl.Close()
-}
-
-func (c *Client) RawConn() *sql.DB {
-	return c.cl.RawConn()
-}
-
-// SqlcWrapper wraps pgxpool.Pool to implement sqlc's DBTX interface.
-type SqlcWrapper struct {
-	pgx *pgxpool.Pool
-}
-
-func (sw *SqlcWrapper) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
-	return sw.pgx.Exec(ctx, query, args...)
-}
-
-func (sw *SqlcWrapper) Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error) {
-	return sw.pgx.Query(ctx, query, args...)
-}
-
-func (sw *SqlcWrapper) QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row {
-	return sw.pgx.QueryRow(ctx, query, args...)
 }

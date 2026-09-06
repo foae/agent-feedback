@@ -148,8 +148,8 @@ review key return `409`, not an update.
   no overlapping-key rotation mechanism.
 - **HTTP is unencrypted.** Use loopback for local work; for remote use, deploy
   behind authenticated network access and TLS termination or an encrypted
-  private network. The shipped Compose files otherwise publish port 8090 on
-  all host interfaces. Restrict ingress explicitly.
+  private network. Compose defaults to loopback; set `FEEDBACK_BIND_ADDRESS`
+  only after configuring ingress protection.
 - `/health`, `/ready`, and `/metrics` are unauthenticated. Do not expose
   operational endpoints to untrusted networks. There is no application rate
   limiting; enforce request size, timeouts, and rate limits at a trusted proxy.
@@ -159,8 +159,8 @@ review key return `409`, not an update.
   disclose usernames, private repository names, and internal infrastructure.
   There is no general context opt-out. Preview with `--dry-run`; use a minimal
   direct API payload if you do not want automatic context collection.
-- Remote URL sanitization strips conventional URL userinfo, **not every possible
-  credential encoding** (for example query-string tokens). Do not put secrets
+- Automatically collected remote URLs drop userinfo, query strings, fragments,
+  and SCP-style usernames. This is not general secret detection. Do not put secrets
   in report prose, repository URLs, prompts, raw outputs, or reviewer notes.
   The server does not redact submitted content.
 - Data is retained until an operator removes it from PostgreSQL. **Processed
@@ -171,23 +171,37 @@ review key return `409`, not an update.
 - Client payloads also exist in local cache/spool files under
   `~/.cache/agent-feedback/`. Protect the account and cache permissions. Pending
   reviews age out after about 30 days and frictions after about 20 hours;
-  rejected files are retained for inspection. Retries require another client
-  invocation; there is no background delivery daemon.
+  rejected files expire after 30 days and produce backlog warnings.
+  Retries require another client invocation; there is no background daemon.
 - Treat stored prompts, outputs, and suggested fixes as **untrusted text**, not
   instructions for a consuming agent to execute automatically.
 
-### Current correctness limits
+### Replay guarantees and limitations
 
 Review replay is keyed by `(skill, run_id)`: identical content returns the
-existing row, changed content returns `409`. Friction duplicate absorption uses
-a 24-hour content-hash window and excludes context, but is **best-effort under
-concurrency**: simultaneous identical requests can create multiple rows.
+existing row, changed content returns `409`. Legacy reviews stored before
+payload hashes were introduced return the existing row without comparing content.
+Friction duplicate absorption serializes concurrent identical requests within
+a 24-hour content-hash window and excludes context.
 
-POST handlers reject unknown fields in the first JSON value, but currently do
-not reject a trailing second JSON value or consistently enforce the whole-body
-10 MiB limit after that first value. Do not rely on these boundaries without a
-trusted proxy enforcing total body size. These are known gaps in the stronger
-wording of the API contract, not promises of strict whole-body validation.
+POST bodies require exactly one JSON value, reject unknown fields and enforce
+10 MiB across the whole body, including trailing whitespace.
+
+### Interpreting review data
+
+This is a telemetry store, not a model benchmark or review runner. Scores (1–5)
+and valid/invalid finding counts come from an external coordinator; the service
+does not verify their correctness or impose a grading rubric. Record your rubric,
+task, model/version, configuration and validation evidence before comparing runs.
+Reviewer agreement is not independent proof: models can share blind spots, and
+coordinator judgments can be biased. Missing counts are unknown, not zero;
+timeouts and failed runs are not successful reviews. Duration and output bytes
+do not measure quality. Selection effects, changing prompts and small samples
+make global model rankings unreliable.
+
+The client refuses completed runs without grades and ambiguous same-second
+timestamp-keyed scorecards. Resolve ambiguity in the external runner/ledger;
+do not silently borrow a sibling run's scores.
 
 ## Development and verification
 
@@ -204,8 +218,8 @@ just run-local
 
 `just run-local` stays in the foreground. From another terminal, query
 `http://127.0.0.1:8080/ready`. From the service directory, `just check` runs fmt,
-vet, sqlc vet/compile, module tidy, and build; it can modify generated formatting
-and module metadata. `just sqlc-generate` regenerates SQL bindings.
+vet, sqlc vet/compile/generation, module tidy, and build; it can modify generated
+files and module metadata. `just sqlc-generate` regenerates SQL bindings.
 
 From the repository root:
 
@@ -217,10 +231,10 @@ bash tests/skill/run-tests.sh  # Hermetic client tests; also requires python3.
 bash scripts/e2e.sh "$AGENT_FEEDBACK_API_KEY" "$AGENT_FEEDBACK_URL"
 ```
 
-Integration tests skip when `TEST_POSTGRES_URL` is absent. CI runs vet, build,
-the Go suite with a real PostgreSQL service, and the skill tests. It does not
-currently enforce every `just check` step or run the live HTTP e2e suite. Pushes
-to `main` also publish `ghcr.io/<repository-owner>/<repository-name>` images
+Integration tests skip when `TEST_POSTGRES_URL` is absent. CI enforces `just
+check` plus a clean generated tree, race tests with PostgreSQL, live HTTP e2e,
+shellcheck and the hermetic skill suite. Pushes to `main` publish amd64/arm64
+`ghcr.io/<repository-owner>/<repository-name>` images
 tagged `latest` and the commit SHA. Registry package visibility is managed
 separately; do not assume repository publication changes it.
 
@@ -242,8 +256,8 @@ For service changes, read [the contributor/agent guide](CLAUDE.md) and
 `scripts/e2e.sh`, and the client skill in sync. Edit SQL inputs and regenerate
 sqlc code; never hand-edit generated bindings or deployed migrations.
 
-The architecture/patterns/adding-a-service documents retain template material;
-references to `services/example/` are not runnable instructions in this checkout.
+The [architecture](docs/architecture.md), [patterns](docs/patterns.md), and
+[extension guide](docs/adding-a-service.md) describe this service's actual layout.
 
 ## SSH deployment
 
@@ -267,19 +281,60 @@ uses `~/agent-feedback` on the remote host; its `.env` contains generated
 credentials. The script sets `FEEDBACK_IMAGE` for Compose explicitly; manual
 Compose invocations must set it too.
 
-The deployment stack exposes port 8090 over HTTP. Restrict access to a trusted
-network or provide an authenticated TLS boundary before exposing it externally.
+The deployment stack binds port 8090 to loopback by default. Configure a trusted
+network or authenticated TLS boundary before overriding `FEEDBACK_BIND_ADDRESS`.
 This script does not provide automatic rollback or database backups.
 
 `.private/` is gitignored and intended for local deployment settings and recovery
 bundles. These files may contain sensitive historical data: keep the directory
 owner-only (`chmod 700 .private`) and never force-add it to Git.
 
+## Operations and recovery
+
+Back up before upgrades and on a schedule appropriate to your acceptable data
+loss. From `infra/agent-feedback/` on a running stack:
+
+```bash
+umask 077
+docker compose exec -T postgres pg_dump -U feedback -d feedback -Fc > feedback.dump
+```
+
+Encrypt and restrict backups, retain copies outside the service host, and verify
+restoration into a separate disposable database before relying on them:
+
+```bash
+docker compose exec -T postgres createdb -U feedback feedback_restore
+docker compose exec -T postgres pg_restore -U feedback -d feedback_restore \
+  --exit-on-error --no-owner < feedback.dump
+docker compose exec -T postgres psql -U feedback -d feedback_restore \
+  -c 'SELECT submission_type, count(*) FROM submissions GROUP BY submission_type;'
+```
+
+Compare restored counts and sample records to the source; exercise the API against
+the restored database in an isolated service. Do not restore over a live database.
+For recovery, stop writers, restore a tested backup into a fresh database, point
+the service at it and verify readiness and records before restarting producers.
+Use a schema-compatible image; migrations run automatically on startup.
+
+Choose an explicit retention period for database records, local spools and backups.
+There is no automatic database deletion. If policy calls for purging processed
+records, back up first and preview the same predicate before deletion, for example:
+
+```sql
+SELECT count(*) FROM submissions
+WHERE processed_at < now() - interval '90 days';
+-- Execute only after approving the preview and your retention policy:
+DELETE FROM submissions WHERE processed_at < now() - interval '90 days';
+```
+
+For key rotation, pause producers, replace server `API_KEY`, recreate the service,
+update all clients and resume. Old keys must return 401; the new key must work.
+There is no overlap window. Check pending/rejected spool warnings after outages;
+inspect private rejected payloads to fix the cause before deliberately resubmitting.
+
 ## Licensing and reporting
 
-**A repository-wide license has not yet been selected and added.** The companion
-skill's metadata says MIT, but that is not a clear license grant for the whole
-repository. Do not assume all repository content is MIT-licensed.
+This repository is licensed under the [MIT License](LICENSE).
 
 A private vulnerability-reporting channel has not yet been documented. Do not
 post API keys, private telemetry, or exploit details containing sensitive data

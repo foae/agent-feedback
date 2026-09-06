@@ -1,8 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 
@@ -12,18 +10,8 @@ import (
 // HandleCreateFriction handles POST /api/v1/frictions.
 func (h *Handler) HandleCreateFriction() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
-
 		var req CreateFrictionRequest
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			var maxBytesErr *http.MaxBytesError
-			if errors.As(err, &maxBytesErr) {
-				writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 10 MiB")
-				return
-			}
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid request body: "+err.Error())
+		if !decodeRequestBody(w, r, &req) {
 			return
 		}
 
@@ -40,7 +28,11 @@ func (h *Handler) HandleCreateFriction() http.HandlerFunc {
 		})
 		if err != nil {
 			status := mapSubmissionError(err)
-			slog.Error("failed to create friction submission", "error", err, "category", req.Category)
+			if status >= http.StatusInternalServerError {
+				slog.ErrorContext(r.Context(), "failed to create friction submission", "error", err, "category", req.Category)
+			} else {
+				slog.WarnContext(r.Context(), "rejected friction submission", "error", err, "category", req.Category)
+			}
 			writeError(w, status, "create_friction_failed", errorMessage(status, err))
 			return
 		}

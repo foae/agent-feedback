@@ -5,7 +5,8 @@ Usage: mock_server.py <state_dir>
 
   <state_dir>/port            written once bound (ephemeral port)
   <state_dir>/mode            read per request: created | duplicate | reject400 |
-                              error500 | replay200 | mismatch409 | collision200
+                              error500 | replay200 | mismatch409 | collision200 |
+                              friction_bad_created | friction_wrong_duplicate
                               (missing file -> created)
   <state_dir>/requests.jsonl  one JSON line per request received
 
@@ -83,6 +84,16 @@ class Handler(BaseHTTPRequestHandler):
                     "id": 55, "submission_type": "friction",
                     "machine_name": body.get("machine_name"),
                     "payload": body, "created_at": "2026-07-29T00:00:00Z",
+                })
+            elif m == "friction_bad_created":
+                self._send(201, {
+                    "id": "101", "submission_type": "friction",
+                    "machine_name": body.get("machine_name"), "payload": body,
+                })
+            elif m == "friction_wrong_duplicate":
+                self._send(200, {
+                    "id": 55, "submission_type": "multi-llm-review",
+                    "machine_name": body.get("machine_name"), "payload": body,
                 })
             elif m == "reject400":
                 self._send(400, {"error": "create_friction_failed",

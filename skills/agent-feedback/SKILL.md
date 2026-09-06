@@ -160,10 +160,9 @@ itself — one question, not a leftover row.)
 
 ### submit-review.sh — (re)submit a review run
 
-Normally you never call this: `_lib/score-review.sh` fires it automatically
-when you fill a run's last PENDING scorecard row, and the review runner
-launches `--sweep` at end-of-run to recover failed submissions and flush the
-spool. Manual uses:
+External review runners can invoke this after grading or use `--sweep` to recover
+failed submissions. The runner and scoring tools are not bundled with this skill.
+Manual uses:
 
 ```bash
 # Resubmit a specific run (idempotent — identical replay returns the record):
@@ -182,8 +181,16 @@ never overwrites. Surface it; a correction must be a new submission.
 `--include-outputs` after a default auto-submit will 409 for exactly this
 reason: the enriched payload differs from the stored one.
 
-Run dirs without `meta.json` predate the integration and are skipped. Sweep
-never submits a run that still has PENDING scorecard rows.
+Run dirs without `meta.json` predate the integration and are skipped. Both direct
+submission and sweep require a grade for every completed reviewer; blank optional
+finding counts remain absent. Runs sharing a timestamp are refused because the
+external timestamp-keyed ledger cannot disambiguate their grades. Resolve the
+ledger at its source rather than borrowing sibling scores. Attribution always
+comes from the run's `meta.json.caller`, including delayed direct submissions.
+
+Legacy server rows without payload hashes return the stored record on replay
+without comparing content. Use a new run ID for corrections. Scores are external
+coordinator judgments, not independently verified benchmarks.
 
 ### process.sh — the feedback processor's tooling
 
@@ -226,3 +233,9 @@ to also flush the write spool.
 - `{"status":"rejected"}` (4xx) → the server names the offending field; a
   payload/contract bug to report, not a retry case.
 - The scripts never print the API key.
+- Authentication headers use an owner-only temporary file, not curl arguments.
+- Invalid successful friction receipts are retained for retry, not acknowledged.
+- Rejected spool files emit backlog warnings and expire after 30 days.
+- Automatically collected remote URLs remove userinfo, query strings, fragments
+  and SCP usernames. Explicit context and report prose remain your responsibility;
+  preview them and never include secrets.

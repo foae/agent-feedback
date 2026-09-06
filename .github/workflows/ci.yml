@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
@@ -34,17 +33,55 @@ jobs:
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      - name: vet
-        working-directory: backend
-        run: go vet ./...
-      - name: build
-        working-directory: backend
-        run: go build ./...
-      - name: test (integration tests run against the postgres service)
+      - uses: taiki-e/install-action@just
+      - name: just check and generated SQL cleanliness
+        run: |
+          just --justfile backend/services/feedback/justfile check
+          git diff --exit-code
+      - name: race tests (integration tests run against the PostgreSQL service)
         working-directory: backend
         env:
           TEST_POSTGRES_URL: postgres://postgres:test@127.0.0.1:5432/feedback_test?sslmode=disable
         run: go test -race -count=1 ./...
+      - name: live HTTP end-to-end API contract
+        env:
+          E2E_API_KEY: ci-e2e-api-${{ github.run_id }}-${{ github.run_attempt }}
+          E2E_POSTGRES_PASSWORD: ci-e2e-db-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          docker run --detach --rm --name feedback-e2e-postgres \
+            --env POSTGRES_USER=feedback \
+            --env POSTGRES_PASSWORD="$E2E_POSTGRES_PASSWORD" \
+            --env POSTGRES_DB=feedback_e2e \
+            --publish 127.0.0.1:15432:5432 postgres:18-alpine
+          feedback_pid=
+          cleanup() {
+            if [ -n "$feedback_pid" ]; then
+              kill -TERM "$feedback_pid" 2>/dev/null || true
+              wait "$feedback_pid" || true
+            fi
+            docker rm --force feedback-e2e-postgres >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 30); do
+            if docker exec feedback-e2e-postgres pg_isready -U feedback -d feedback_e2e >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec feedback-e2e-postgres pg_isready -U feedback -d feedback_e2e >/dev/null
+          E2E_POSTGRES_URL="postgres://feedback:${E2E_POSTGRES_PASSWORD}@127.0.0.1:15432/feedback_e2e?sslmode=disable"
+          API_KEY="$E2E_API_KEY" POSTGRES_URL="$E2E_POSTGRES_URL" \
+            HTTP_LISTEN_ADDR=127.0.0.1:18080 ENV_MODE=ci ./backend/bin/feedback &
+          feedback_pid=$!
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/ready >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent --show-error http://127.0.0.1:18080/ready >/dev/null
+          bash scripts/e2e.sh "$E2E_API_KEY" http://127.0.0.1:18080
 
   skill:
     runs-on: ubuntu-latest
@@ -54,13 +91,16 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           cd skills/agent-feedback/scripts && shellcheck -x ./*.sh
-      - name: hermetic client tests (mock server)
+      - name: hermetic client tests (mock server with isolated HOME)
         run: bash tests/skill/run-tests.sh
 
   image:
     needs: [test, skill]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
@@ -68,12 +108,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: build and push
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: build and push multi-architecture image
         uses: docker/build-push-action@v6
         with:
           context: backend
           file: backend/services/feedback/Dockerfile
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}

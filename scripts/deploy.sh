@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Deploy a GHCR image over SSH without registry credentials on the target.
+# Deploy a GHCR image over explicitly configured SSH without registry
+# credentials on the target.
 # Usage: scripts/deploy.sh [image-tag]
 # Required: DEPLOY_REMOTE (SSH destination), DEPLOY_IMAGE (GHCR repo, no tag).
-# Optional local settings: .private/deploy.env. Credentials stay on the target.
+# Optional local settings: .private/deploy.env.
 # crane avoids incomplete docker-save archives with containerd image stores.
 set -euo pipefail
 
@@ -19,11 +20,18 @@ TAG=${1:-latest}
 IMAGE="${DEPLOY_IMAGE}:${TAG}"
 
 command -v crane >/dev/null || { echo "crane is required: brew install crane"; exit 1; }
-echo "==> Logging into GHCR locally (crane reads Docker's credential config)"
-gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin >/dev/null
-
+umask 077
+AUTH_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-feedback-crane-auth-XXXXXX")
 IMG_TAR=$(mktemp /tmp/agent-feedback-image-XXXXXX.tar)
-trap 'rm -f "${IMG_TAR}"' EXIT
+cleanup() {
+  rm -rf -- "$AUTH_DIR"
+  rm -f -- "$IMG_TAR"
+}
+trap cleanup EXIT
+export DOCKER_CONFIG="$AUTH_DIR"
+
+echo "==> Logging into GHCR locally with temporary crane credentials"
+gh auth token | crane auth login ghcr.io -u "$(gh api user -q .login)" --password-stdin
 echo "==> Fetching ${IMAGE} from GHCR"
 crane pull "${IMAGE}" "${IMG_TAR}"
 echo "==> Streaming image to ${DEPLOY_REMOTE}"

@@ -2,6 +2,8 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -10,8 +12,43 @@ import (
 	"agent-feedback/backend/services/feedback/storage/postgres/sqlc"
 )
 
-// maxRequestBytes caps the size of a decoded request body.
+// maxRequestBytes caps the entire request body, including trailing whitespace.
 const maxRequestBytes = 10 << 20
+
+// decodeRequestBody accepts exactly one JSON value, rejects unknown fields, and
+// reads through EOF so the byte limit applies to the complete body.
+func decodeRequestBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(dst); err != nil {
+		writeRequestBodyError(w, err)
+		return false
+	}
+
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 10 MiB")
+		} else {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid request body: must contain exactly one JSON value")
+		}
+		return false
+	}
+
+	return true
+}
+
+func writeRequestBodyError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 10 MiB")
+		return
+	}
+	writeError(w, http.StatusBadRequest, "bad_request", "invalid request body: "+err.Error())
+}
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")

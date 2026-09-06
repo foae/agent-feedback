@@ -147,6 +147,11 @@ s=$(req -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/js
   -d "$(jq --arg r "$RUN-unknownfield" '.run_id=$r | .bogus_field=1' <<<"$REVIEW")" $BASE/api/v1/reviews)
 chk "review unknown field -> 400" 400 "$s"
 
+# Valid review followed by another JSON value -> 400.
+s=$(req -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "$(jq --arg r "$RUN-trailing" '.run_id=$r' <<<"$REVIEW"){}" $BASE/api/v1/reviews)
+chk "review trailing JSON value -> 400" 400 "$s"
+
 # 23 review with reserved skill "friction" -> 400
 s=$(req -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d "$(jq --arg r "$RUN-reservedskill" '.run_id=$r | .skill="friction"' <<<"$REVIEW")" $BASE/api/v1/reviews)
@@ -184,11 +189,15 @@ s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
   -d '{"ids":[]}' $BASE/api/v1/submissions/processed)
 chk "processed empty ids -> 400" 400 "$s"
 
-# 29 oversized body -> 413
+# Processed requests follow the same one-value JSON contract.
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "{\"ids\":[$rid]} []" $BASE/api/v1/submissions/processed)
+chk "processed trailing JSON value -> 400" 400 "$s"
+
+# Complete body over 10 MiB only because of trailing whitespace -> 413.
 {
-  printf '{"skill":"multi-llm-review","machine_name":"e2e-test","coordinator_model":"c","run_id":"%s","prompt":"' "$RUN-413"
-  head -c 11534336 /dev/zero | tr '\0' 'a'
-  printf '","reviewers":[{"slot":"s","model":"m","status":"completed"}]}'
+  printf '%s' "$(jq --arg r "$RUN-413" '.run_id=$r' <<<"$REVIEW")"
+  head -c 11534336 /dev/zero | tr '\0' ' '
 } >"$BIG"
 s=$(req -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' --data-binary @"$BIG" $BASE/api/v1/reviews)
 chk "body over 10 MiB -> 413" 413 "$s"

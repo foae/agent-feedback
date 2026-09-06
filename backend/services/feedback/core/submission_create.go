@@ -275,26 +275,40 @@ func (s *Service) CreateFriction(ctx context.Context, in CreateFrictionInput) (s
 		return sqlc.Submission{}, false, fmt.Errorf("hash friction payload: %w", err)
 	}
 
-	// Duplicate absorption: retries and double-fires inside the window return
-	// the existing row. The same friction re-encountered after the window still
-	// creates a new row, so recurrence stays visible to the processor.
-	existing, err := s.db.Queries().GetRecentFrictionByHash(ctx, sqlc.GetRecentFrictionByHashParams{
+	// Duplicate absorption must serialize the lookup and creation. The advisory
+	// lock is acquired in its own statement; under READ COMMITTED the lookup
+	// therefore observes a fresh snapshot after a waiter acquires the lock.
+	payload, err := json.Marshal(payloadShape)
+	if err != nil {
+		return sqlc.Submission{}, false, fmt.Errorf("marshal friction payload: %w", err)
+	}
+
+	tx, err := s.db.DB().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return sqlc.Submission{}, false, fmt.Errorf("begin friction dedupe: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txDB := s.db.WithTx(tx)
+	if err := txDB.Queries().LockFrictionDedupe(ctx, hash); err != nil {
+		return sqlc.Submission{}, false, fmt.Errorf("lock friction dedupe: %w", err)
+	}
+
+	existing, err := txDB.Queries().GetRecentFrictionByHash(ctx, sqlc.GetRecentFrictionByHashParams{
 		PayloadHash: pgtype.Text{String: hash, Valid: true},
 		CreatedAt:   pgtype.Timestamptz{Time: time.Now().Add(-frictionDedupeWindow), Valid: true},
 	})
 	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return sqlc.Submission{}, false, fmt.Errorf("commit friction duplicate absorption: %w", err)
+		}
 		return existing, true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return sqlc.Submission{}, false, fmt.Errorf("check duplicate friction: %w", err)
 	}
 
-	payload, err := json.Marshal(payloadShape)
-	if err != nil {
-		return sqlc.Submission{}, false, fmt.Errorf("marshal friction payload: %w", err)
-	}
-
-	created, err := s.db.Queries().CreateSubmission(ctx, sqlc.CreateSubmissionParams{
+	created, err := txDB.Queries().CreateSubmission(ctx, sqlc.CreateSubmissionParams{
 		SubmissionType:   "friction",
 		MachineName:      machineName,
 		CoordinatorModel: coordinatorModel,
@@ -304,6 +318,9 @@ func (s *Service) CreateFriction(ctx context.Context, in CreateFrictionInput) (s
 	})
 	if err != nil {
 		return sqlc.Submission{}, false, fmt.Errorf("create friction submission: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sqlc.Submission{}, false, fmt.Errorf("commit friction submission: %w", err)
 	}
 
 	slog.InfoContext(ctx, "friction submission created",

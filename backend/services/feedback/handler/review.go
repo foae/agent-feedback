@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -12,18 +11,8 @@ import (
 // HandleCreateReview handles POST /api/v1/reviews.
 func (h *Handler) HandleCreateReview() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
-
 		var req CreateReviewRequest
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			var maxBytesErr *http.MaxBytesError
-			if errors.As(err, &maxBytesErr) {
-				writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 10 MiB")
-				return
-			}
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid request body: "+err.Error())
+		if !decodeRequestBody(w, r, &req) {
 			return
 		}
 
@@ -57,7 +46,11 @@ func (h *Handler) HandleCreateReview() http.HandlerFunc {
 			if errors.Is(err, core.ErrReplayMismatch) {
 				errType = "replay_mismatch"
 			}
-			slog.Error("failed to create review submission", "error", err, "skill", req.Skill, "run_id", req.RunID)
+			if status >= http.StatusInternalServerError {
+				slog.ErrorContext(r.Context(), "failed to create review submission", "error", err, "skill", req.Skill, "run_id", req.RunID)
+			} else {
+				slog.WarnContext(r.Context(), "rejected review submission", "error", err, "skill", req.Skill, "run_id", req.RunID)
+			}
 			writeError(w, status, errType, errorMessage(status, err))
 			return
 		}

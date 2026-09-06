@@ -32,6 +32,7 @@ AF_CACHE="$HOME/.cache/agent-feedback"
 AF_SPOOL="$AF_CACHE/spool"
 AF_REVIEW_MAX_AGE_DAYS=30
 AF_FRICTION_MAX_AGE_MINS=1200   # 20h — safely inside the server's 24h dedupe window
+AF_REJECTED_MAX_AGE_DAYS=7
 AF_CLIENT_VERSION="2.1"
 
 af_machine() { printf '%s' "${AGENT_FEEDBACK_MACHINE:-$(hostname -s)}"; }
@@ -49,10 +50,39 @@ af_require_deps() {
   command -v jq >/dev/null || af_die "jq not found"
 }
 
+af_validate_api_key() {
+  case "$AF_KEY" in
+    *$'\n'*|*$'\r'*) af_die "AGENT_FEEDBACK_API_KEY must not contain a newline" ;;
+  esac
+}
+
 af_require_key() {
   [ -n "$AF_URL" ] || af_die "AGENT_FEEDBACK_URL is not set — configure your service endpoint"
-  [ -n "$AF_KEY" ] && return 0
-  af_die "AGENT_FEEDBACK_API_KEY is not set — export it in your shell profile (ask the operator for the key)"
+  [ -n "$AF_KEY" ] || af_die "AGENT_FEEDBACK_API_KEY is not set — export it in your shell profile (ask the operator for the key)"
+  af_validate_api_key
+}
+
+# af_auth_header_file → a mode-0600 curl header file. Keeping the credential in
+# a file, rather than `-H "Authorization: …"` argv, prevents same-user process
+# inspection from exposing it.
+af_auth_header_file() {
+  local header
+  af_validate_api_key
+  header=$(mktemp "${TMPDIR:-/tmp}/agent-feedback-header.XXXXXX") \
+    || af_die "could not create protected curl header file"
+  chmod 600 "$header" \
+    || { rm -f "$header"; af_die "could not protect curl header file"; }
+  printf 'Authorization: Bearer %s\n' "$AF_KEY" >"$header" \
+    || { rm -f "$header"; af_die "could not write protected curl header file"; }
+  printf '%s\n' "$header"
+}
+
+# af_friction_response_valid <response-file> — accept only the create/dedupe
+# response shape that proves this is a friction submission.
+af_friction_response_valid() {
+  jq -e '(.id? | select(type == "number")) as $id
+         | ($id > 0 and $id == ($id | floor))
+           and .submission_type == "friction"' "$1" >/dev/null 2>&1
 }
 
 # af_request <METHOD> <path> [payload-file]
@@ -60,13 +90,15 @@ af_require_key() {
 # score-review.sh auto-submit hook), so a dead service must cost ~2s, not 30.
 # Sets: AF_HTTP_CODE (000 on transport failure), AF_CURL_EXIT, AF_RESP (body file).
 af_request() {
-  local method="$1" path="$2" payload="${3:-}"
+  local method="$1" path="$2" payload="${3:-}" header
   AF_RESP=$(mktemp)
+  header=$(af_auth_header_file)
   local -a args=(-sS -m 10 --connect-timeout 2 -o "$AF_RESP" -w '%{http_code}' \
-    -H "Authorization: Bearer $AF_KEY" -X "$method")
+    -H "@$header" -X "$method")
   [ -n "$payload" ] && args+=(-H "Content-Type: application/json" --data-binary "@$payload")
   AF_CURL_EXIT=0
   AF_HTTP_CODE=$(curl "${args[@]}" "$AF_URL$path" 2>/dev/null) || AF_CURL_EXIT=$?
+  rm -f "$header"
   [ -n "$AF_HTTP_CODE" ] || AF_HTTP_CODE=000
   return 0
 }
@@ -74,11 +106,13 @@ af_request() {
 # af_request_get <path> [--data-urlencode k=v ...]
 # GET with proper URL encoding of every query value (curl --get).
 af_request_get() {
-  local path="$1"; shift
+  local path="$1" header; shift
   AF_RESP=$(mktemp)
+  header=$(af_auth_header_file)
   AF_CURL_EXIT=0
   AF_HTTP_CODE=$(curl -sS -m 10 --connect-timeout 2 -o "$AF_RESP" -w '%{http_code}' \
-    -H "Authorization: Bearer $AF_KEY" --get "$@" "$AF_URL$path" 2>/dev/null) || AF_CURL_EXIT=$?
+    -H "@$header" --get "$@" "$AF_URL$path" 2>/dev/null) || AF_CURL_EXIT=$?
+  rm -f "$header"
   [ -n "$AF_HTTP_CODE" ] || AF_HTTP_CODE=000
   return 0
 }
@@ -102,17 +136,22 @@ af_spool() {
   af_warn "payload spooled to $AF_SPOOL/$name (will retry on the next submit/flush call)"
 }
 
-# One-line human-visible signal that the service has been unreachable.
+# One-line human-visible signal that retryable and rejected spool files exist.
 af_backlog_warning() {
   [ -d "$AF_SPOOL" ] || return 0
-  local n
-  n=$(find "$AF_SPOOL" -maxdepth 1 \( -name '*.json' -o -name '*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
-  [ "$n" -gt 0 ] && af_warn "spool backlog: $n unsent submission(s) in $AF_SPOOL — the service has been unreachable"
+  local retryable rejected
+  retryable=$(find "$AF_SPOOL" -maxdepth 1 \( -name '*.json' -o -name '*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
+  rejected=$(find "$AF_SPOOL" -maxdepth 1 -name '*.rejected' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$retryable" -gt 0 ] \
+    && af_warn "spool backlog: $retryable unsent submission(s) in $AF_SPOOL — the service has been unreachable"
+  [ "$rejected" -gt 0 ] \
+    && af_warn "spool backlog: $rejected rejected submission(s) in $AF_SPOOL — inspect before automatic retention expires"
   return 0
 }
 
 # af_prune_spool — age out entries instead of growing forever. Covers BOTH
-# *.json and *.inflight (an interrupted claim must not survive pruning).
+# *.json and *.inflight (an interrupted claim must not survive pruning), plus
+# inspected .rejected files which must not grow without bound.
 af_prune_spool() {
   [ -d "$AF_SPOOL" ] || return 0
   local old summary
@@ -128,6 +167,11 @@ af_prune_spool() {
       -mmin +"$AF_FRICTION_MAX_AGE_MINS" -print 2>/dev/null | while read -r old; do
     summary=$(jq -r '.summary // "?"' "$old" 2>/dev/null | head -c 120)
     af_warn "dropping spooled friction older than 20h (past the server dedupe window): $(basename "$old") — summary was: $summary — re-file it if still relevant"
+    rm -f "$old"
+  done
+  find "$AF_SPOOL" -maxdepth 1 \( -name 'review-*.rejected' -o -name 'friction-*.rejected' \) \
+      -mtime +"$AF_REJECTED_MAX_AGE_DAYS" -print 2>/dev/null | while read -r old; do
+    af_warn "dropping rejected spool older than ${AF_REJECTED_MAX_AGE_DAYS}d: $(basename "$old")"
     rm -f "$old"
   done
 }
@@ -153,6 +197,11 @@ af_flush_spool() {
     fi
     af_request POST "$endpoint" "$claimed"
     if [ "$AF_HTTP_CODE" = 201 ] || [ "$AF_HTTP_CODE" = 200 ]; then
+      if [ "$prefix" = friction ] && ! af_friction_response_valid "$AF_RESP"; then
+        af_warn "spooled $(basename "$claimed") received malformed friction success response — retaining for retry"
+        rm -f "$AF_RESP"
+        continue
+      fi
       if [ "$prefix" = review ]; then
         # Trust a 200/201 only if it is OUR record (post-409-API this should
         # always hold; the check guards against a legacy no-hash row).
@@ -242,10 +291,39 @@ af_detect_model() {
   printf '%s' "${AGENT_FEEDBACK_MODEL:-${REVIEW_CALLER_MODEL:-${PI_MODEL:-${OPENCODE_MODEL:-unknown}}}}"
 }
 
+# Strip credentials and non-identity suffixes from a remotely collected Git
+# URL. This deliberately applies only to automatic context collection: caller
+# supplied context stays verbatim under the documented merge rule.
+af_scrub_git_remote() {
+  local remote="$1" scheme rest authority tail
+  remote="${remote%%\#*}"
+  remote="${remote%%\?*}"
+  case "$remote" in
+    *://*)
+      scheme="${remote%%://*}"
+      rest="${remote#*://}"
+      authority="${rest%%/*}"
+      tail="${rest#"$authority"}"
+      [ "$tail" = "$rest" ] && tail=""
+      authority="${authority##*@}"
+      remote="$scheme://$authority$tail"
+      ;;
+    *)
+      # SCP-style Git remotes (`user@host:path`) have no URL authority, but
+      # their username is still context metadata rather than repository identity.
+      if [[ "$remote" =~ ^[^/@:]+@[^/:]+: ]]; then
+        remote="${remote#*@}"
+      fi
+      ;;
+  esac
+  printf '%s' "$remote"
+}
+
 # Project auto-detection: git remote basename, else cwd basename.
 af_detect_project() {
-  local p
-  p=$(git remote get-url origin 2>/dev/null | sed 's#.*/##; s#\.git$##') || true
+  local p remote
+  remote=$(git remote get-url origin 2>/dev/null) || true
+  p=$(af_scrub_git_remote "$remote" | sed 's#.*/##; s#\.git$##')
   [ -n "$p" ] || p=$(basename "$PWD")
   printf '%s' "$p"
 }
@@ -273,7 +351,7 @@ af_collect_context() {
   osname="$(uname -s) $(uname -r)"
   arch=$(uname -m)
   if root=$(git rev-parse --show-toplevel 2>/dev/null); then
-    remote=$(git remote get-url origin 2>/dev/null | sed 's#//[^/@]*@#//#') || true
+    remote=$(af_scrub_git_remote "$(git remote get-url origin 2>/dev/null)") || true
     branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || true
     commit=$(git rev-parse --short HEAD 2>/dev/null) || true
     if [ -n "$(git status --porcelain 2>/dev/null | head -1)" ]; then dirty=true; else dirty=false; fi
