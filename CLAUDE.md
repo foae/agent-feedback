@@ -93,12 +93,12 @@ docker rm -f pg-test
 
 ## Deployment facts
 
-- Production: compose stack on **deploy-host** (Intel Mac / Docker Desktop / Tailscale),
-  service at `http://deploy-host:8090`, deployed manually via `scripts/deploy.sh`
-  (full runbook in [README.md](README.md)). CI publishes the image to
-  `ghcr.io/foae/agent-feedback` on every `main` push; the script ships it to deploy-host
-  over SSH — deploy-host has no registry credentials and the API key exists only in
-  `~/agent-feedback/.env` there.
+- Deployment is configured with `DEPLOY_REMOTE` and `DEPLOY_IMAGE`, either in the
+  environment or in the gitignored `.private/deploy.env`. Use `scripts/deploy.sh`
+  (runbook in [README.md](README.md)). CI publishes the repository's GHCR image
+  on each `main` push; the script streams it over SSH without putting registry
+  credentials on the remote host. Generated API credentials remain in the
+  remote host's `~/agent-feedback/.env`.
 - Changing `infra/agent-feedback/docker-compose.deploy.yml` changes what the next
   deploy installs; the sibling `docker-compose.yml` (build-based) is for local
   stacks only.

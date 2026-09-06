@@ -35,3 +35,6 @@ backend/vendor
 
 # Local build output (just build)
 backend/bin/
+
+# Private deployment settings and pre-publication recovery data
+/.private/

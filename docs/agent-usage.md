@@ -17,9 +17,12 @@ don't have to. Hand-roll `curl` only for a new producer the skill doesn't cover
 Two env vars, set by the operator on each machine that submits:
 
 ```
-AGENT_FEEDBACK_URL=http://127.0.0.1:8090     # production: deploy-host (Tailscale hostname: http://deploy-host:8090)
-AGENT_FEEDBACK_API_KEY=<shared key>             # lives in deploy-host:~/agent-feedback/.env
+AGENT_FEEDBACK_URL=http://127.0.0.1:8090        # example local stack; set your own endpoint
+AGENT_FEEDBACK_API_KEY=<shared key>             # obtain privately from your operator
 ```
+
+The companion client requires an explicit URL for API calls; it has no hosted
+service or default destination.
 
 Every `/api/v1/*` request requires the key, either header works:
 
