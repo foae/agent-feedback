@@ -7,8 +7,9 @@ readiness.
 
 ## Prerequisites
 
-On the machine running the script: authenticated `gh`, `crane`, Docker CLI,
-SSH, and SCP. On the remote host: Docker Compose and `curl`. The local script
+On the machine running the script: Bash, authenticated `gh`, `crane`, SSH,
+and SCP. On the remote host: Bash, Docker with Compose, `curl`, and `openssl`
+(used to generate credentials on first deployment). The local script
 requires these two settings:
 
 ```bash
