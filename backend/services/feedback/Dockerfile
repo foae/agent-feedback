@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build on the BuildKit builder platform and cross-compile the static binary for
 # the target image platform.
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS build
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -18,7 +18,7 @@ RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
 
 # Alpine supplies the runtime curl used by the Compose readiness healthcheck,
 # CA roots, timezone data, and a non-root service account.
-FROM alpine:3.21
+FROM alpine:3.24.1
 
 RUN apk add --no-cache ca-certificates curl tzdata \
     && addgroup -S feedback \

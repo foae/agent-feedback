@@ -402,4 +402,4 @@ uses `meta.json.caller`, not the shell that later retries the run. Timestamp-onl
 scorecards cannot disambiguate sibling runs with the same timestamp: the client
 refuses them rather than borrowing scores. Resolve this in the external ledger.
 Scores are coordinator judgments, not independently verified quality measures;
-see [methodology limitations](../README.md#interpreting-review-data).
+see [methodology limitations](operations.md#interpret-review-data-carefully).

@@ -19,7 +19,7 @@ your task needs it. If you are instead **submitting data to the running service*
 | Install/adopt the companion skill | `skills/agent-feedback/SKILL.md` — Installation section |
 | Understand naming/error/test conventions | [docs/conventions.md](docs/conventions.md) |
 | See how the service was scaffolded | [docs/adding-a-service.md](docs/adding-a-service.md), [docs/patterns.md](docs/patterns.md) |
-| Run / verify / deploy | Commands + Verification below; deploy runbook in [README.md](README.md) ("Deploy to production") |
+| Run / verify / deploy | Commands + Verification below; [deployment runbook](docs/deployment.md) |
 
 ## Layout
 
@@ -95,7 +95,7 @@ docker rm -f pg-test
 
 - Deployment is configured with `DEPLOY_REMOTE` and `DEPLOY_IMAGE`, either in the
   environment or in the gitignored `.private/deploy.env`. Use `scripts/deploy.sh`
-  (runbook in [README.md](README.md)). CI publishes the repository's GHCR image
+  (runbook in [docs/deployment.md](docs/deployment.md)). CI publishes the repository's GHCR image
   on each `main` push; the script streams it over SSH without putting registry
   credentials on the remote host. Generated API credentials remain in the
   remote host's `~/agent-feedback/.env`.
@@ -114,3 +114,23 @@ docker rm -f pg-test
 4. If you touched `skills/agent-feedback/`: `bash tests/skill/run-tests.sh`
    (hermetic — needs python3, no running stack). Keep the skill directory free
    of tests/tooling — it is distributed verbatim.
+
+## Release every change
+
+- Every delivered change must be included in a named stable release. Use
+  `vMAJOR.MINOR.PATCH`: patch for compatible fixes/docs/dependency updates, minor
+  for compatible features, major for breaking API or operational contracts.
+- Update the stable checkout/link in `README.md` and `docs/getting-started.md`.
+  Align `ServiceVersion` in `backend/services/feedback/cmd/feedback/main.go`
+  and `SERVICE_VERSION` in its sibling `.env.example` with the source release,
+  and add accurate upgrade/release notes in `docs/releases.md`. The companion
+  skill keeps its independent version; bump it only when its own contract changes.
+- Run the verification gates above, commit, and push `main`. Never tag an
+  unverified commit or silently move an existing published tag.
+- Run `python3 scripts/release.py vX.Y.Z 'Release name' /path/to/notes.md`.
+  The tool checks a clean main checkout against origin, waits for successful
+  push CI on that exact SHA, pushes an annotated tag with an absence lease,
+  publishes a stable release, and verifies it. `--check` performs preflight only.
+- See [release workflow and recovery](docs/releases.md) for prerequisites and
+  partial-publication recovery. Source release tags do not imply image tags;
+  deploy the CI-published commit-SHA image.

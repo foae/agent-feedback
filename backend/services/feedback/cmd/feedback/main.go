@@ -39,7 +39,7 @@ const (
 
 type config struct {
 	ServiceName     string        `env:"SERVICE_NAME" envDefault:"agent-feedback"`
-	ServiceVersion  string        `env:"SERVICE_VERSION" envDefault:"v1.0.0"`
+	ServiceVersion  string        `env:"SERVICE_VERSION" envDefault:"v1.0.1"`
 	EnvMode         string        `env:"ENV_MODE" envDefault:"dev"`
 	HTTPListenAddr  string        `env:"HTTP_LISTEN_ADDR" envDefault:"0.0.0.0:8080"`
 	OtelEndpoint    string        `env:"OTEL_TRACING_ENDPOINT"`
