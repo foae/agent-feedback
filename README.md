@@ -10,6 +10,12 @@ remain scattered in local files. For example, an agent reports a broken setup
 instruction; a maintainer retrieves unprocessed reports, fixes the instruction,
 and marks the report processed.
 
+## Stable release
+
+Use the [v1.0.0 release](https://github.com/foae/agent-feedback/releases/tag/v1.0.0)
+for a fixed source snapshot: `git checkout v1.0.0` after cloning. The companion
+skill retains its independent version number.
+
 ## What it does — and does not do
 
 - **Review runs:** stores reviewer models, timings, statuses, human/agent-assigned
@@ -41,8 +47,8 @@ before sending real telemetry.
 ## Quick start: disposable local stack
 
 Requires Git, Docker with Compose **2.24.4 or newer**, Bash, `curl`, and `openssl`.
-Run from a checkout of this repository. The current Dockerfile targets
-**Linux/amd64**; other architectures need emulation or a Dockerfile change.
+Run from a checkout of this repository. Container images support
+**Linux/amd64 and Linux/arm64**.
 
 The commands below build from source, generate local credentials, and override
 the shipped all-interface port mapping with a loopback-only mapping. Use a fresh
