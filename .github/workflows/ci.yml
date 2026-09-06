@@ -65,13 +65,14 @@ jobs:
             docker rm --force feedback-e2e-postgres >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
+          # Require TCP readiness, not the socket-only initialization server.
           for _ in $(seq 1 30); do
-            if docker exec feedback-e2e-postgres pg_isready -U feedback -d feedback_e2e >/dev/null; then
+            if docker exec feedback-e2e-postgres pg_isready -h 127.0.0.1 -U feedback -d feedback_e2e >/dev/null; then
               break
             fi
             sleep 1
           done
-          docker exec feedback-e2e-postgres pg_isready -U feedback -d feedback_e2e >/dev/null
+          docker exec feedback-e2e-postgres pg_isready -h 127.0.0.1 -U feedback -d feedback_e2e >/dev/null
           E2E_POSTGRES_URL="postgres://feedback:${E2E_POSTGRES_PASSWORD}@127.0.0.1:15432/feedback_e2e?sslmode=disable"
           API_KEY="$E2E_API_KEY" POSTGRES_URL="$E2E_POSTGRES_URL" \
             HTTP_LISTEN_ADDR=127.0.0.1:18080 ENV_MODE=ci ./backend/bin/feedback &
