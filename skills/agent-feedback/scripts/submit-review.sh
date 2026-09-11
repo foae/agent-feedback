@@ -63,6 +63,7 @@ scorecard_timestamp_ambiguous() {
   self=$(basename "$run_dir")
   for peer in "$base"/*; do
     [ -d "$peer" ] || continue
+    [ -L "$peer" ] && continue   # the runner's `latest` symlink is not a peer run
     [ "$(basename "$peer")" = "$self" ] && continue
     [ -f "$peer/meta.json" ] || continue
     peer_ts=$(jq -r '.run_ts // empty' "$peer/meta.json" 2>/dev/null) || continue
