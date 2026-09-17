@@ -10,20 +10,22 @@
 #   AGENT_FEEDBACK_HARNESS     optional — overrides harness auto-detection
 #   AGENT_FEEDBACK_MODEL       optional — overrides coordinator-model detection
 #   AGENT_FEEDBACK_SESSION_ID  optional — overrides session-id detection
-# The three overrides make attribution exact from ANY harness: set them in the
+#   AGENT_FEEDBACK_REVIEW_DIRS optional — colon-separated review run-dir bases
+#                              swept by submit-review.sh --sweep
+# The overrides make attribution exact from ANY harness: set them in the
 # harness's profile/hook and detection below never matters.
 #
 # Spool: ~/.cache/agent-feedback/spool/ — one JSON payload per file.
-#   review-*    retry-safe forever: the API is idempotent on (skill, run_id)
+#   review-*    retry-safe for 30d: the API is idempotent on (skill, run_id)
 #               and rejects changed content with 409, so replays never corrupt.
+#   event-*     retry-safe for 30d: idempotent on (kind, key), same rules.
 #   friction-*  retry-safe within the server's 24h content-dedupe window: an
 #               identical friction re-POSTed inside the window is absorbed
 #               (200 + existing row). Spooled frictions older than 20h are
 #               dropped loudly rather than risk a duplicate past the window.
 #   *.inflight  claimed by a flusher (claim-by-rename). A crashed flusher's
 #               .inflight stays eligible on the next flush; a concurrent
-#               double-send is harmless for BOTH types now — the server
-#               dedupes — so no per-type retry ceremony remains.
+#               double-send is harmless for every family — the server dedupes.
 #   *.rejected  got a 4xx/409 back — a payload/content bug, kept for inspection.
 
 AF_URL="${AGENT_FEEDBACK_URL:-}"
@@ -32,8 +34,16 @@ AF_CACHE="$HOME/.cache/agent-feedback"
 AF_SPOOL="$AF_CACHE/spool"
 AF_REVIEW_MAX_AGE_DAYS=30
 AF_FRICTION_MAX_AGE_MINS=1200   # 20h — safely inside the server's 24h dedupe window
-AF_REJECTED_MAX_AGE_DAYS=7
-AF_CLIENT_VERSION="2.1"
+AF_REJECTED_MAX_AGE_DAYS=30
+AF_CLIENT_VERSION="3.0"
+
+# Server-side limits, enforced locally too so a rejection costs no round trip
+# and --dry-run means the same thing the server would say.
+AF_MAX_IDENT_BYTES=200
+AF_MAX_SUMMARY_BYTES=2000
+AF_MAX_CONTEXT_ENTRIES=32
+AF_MAX_CONTEXT_KEY_BYTES=64
+AF_MAX_CONTEXT_VALUE_BYTES=2000
 
 af_machine() { printf '%s' "${AGENT_FEEDBACK_MACHINE:-$(hostname -s)}"; }
 
@@ -42,7 +52,7 @@ af_warn() { echo "agent-feedback: $*" >&2; }
 
 # Machine-readable outcome: ALWAYS the last stdout line of a submit/process
 # call. Agents relay it verbatim. Statuses: submitted, duplicate, spooled,
-# rejected, mismatch, collision, valid.
+# rejected, mismatch, collision, valid, failed.
 af_outcome() { printf '%s\n' "$1"; }
 
 af_require_deps() {
@@ -62,6 +72,61 @@ af_require_key() {
   af_validate_api_key
 }
 
+# ── Local validation (mirrors the server's limits) ───────────────────────────
+
+# af_trim <string> — strip leading/trailing whitespace.
+af_trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+af_bytelen() { LC_ALL=C printf '%s' "$1" | wc -c | tr -d ' '; }
+
+# af_reject <message> — emit the rejection outcome and exit 1.
+af_reject() {
+  af_outcome "$(jq -cn --arg m "$1" '{status:"rejected",message:$m}')"
+  exit 1
+}
+
+# af_check_required <field> <value> — non-empty after trimming.
+af_check_required() {
+  [ -n "$2" ] || af_reject "$1 is required and must not be blank"
+}
+
+# af_check_bytes <field> <value> <limit>
+af_check_bytes() {
+  local n
+  n=$(af_bytelen "$2")
+  [ "$n" -le "$3" ] || af_reject "$1 exceeds $3 bytes (is $n)"
+}
+
+# af_check_identifier <field> <value>
+af_check_identifier() { af_check_bytes "$1" "$2" "$AF_MAX_IDENT_BYTES"; }
+
+# af_check_summary <field> <value>
+af_check_summary() { af_check_bytes "$1" "$2" "$AF_MAX_SUMMARY_BYTES"; }
+
+# af_check_context <json-object> — caps on entry count, key and value size.
+af_check_context() {
+  local msg
+  msg=$(jq -r \
+    --argjson maxn "$AF_MAX_CONTEXT_ENTRIES" \
+    --argjson maxk "$AF_MAX_CONTEXT_KEY_BYTES" \
+    --argjson maxv "$AF_MAX_CONTEXT_VALUE_BYTES" '
+      if (length > $maxn) then "context has \(length) entries (max \($maxn))"
+      else
+        ([to_entries[] | select((.key | utf8bytelength) > $maxk) | .key] | first) as $k
+        | if $k != null then "context key exceeds \($maxk) bytes: \($k)"
+          else
+            ([to_entries[] | select(((.value | tostring) | utf8bytelength) > $maxv) | .key] | first) as $v
+            | if $v != null then "context value for \($v) exceeds \($maxv) bytes" else "" end
+          end
+      end' <<<"$1" 2>/dev/null) || af_reject "context must be a JSON object"
+  [ -z "$msg" ] || af_reject "$msg"
+}
+
 # af_auth_header_file → a mode-0600 curl header file. Keeping the credential in
 # a file, rather than `-H "Authorization: …"` argv, prevents same-user process
 # inspection from exposing it.
@@ -77,12 +142,45 @@ af_auth_header_file() {
   printf '%s\n' "$header"
 }
 
-# af_friction_response_valid <response-file> — accept only the create/dedupe
-# response shape that proves this is a friction submission.
+# ── Receipt validation ───────────────────────────────────────────────────────
+# A 2xx alone never proves the server stored OUR submission. Every success path
+# checks the returned record against the payload that was sent.
+
+# af_friction_response_valid <response-file>
 af_friction_response_valid() {
   jq -e '(.id? | select(type == "number")) as $id
          | ($id > 0 and $id == ($id | floor))
-           and .submission_type == "friction"' "$1" >/dev/null 2>&1
+           and ((.family? == "friction") or (.submission_type == "friction"))' "$1" >/dev/null 2>&1
+}
+
+# af_review_identity_ok <response-file> <payload-file> — same run_id + machine.
+af_review_identity_ok() {
+  jq -e --slurpfile p "$2" \
+    '(.run_id == $p[0].run_id) and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
+}
+
+# af_review_response_valid <response-file> <payload-file>
+af_review_response_valid() {
+  jq -e --slurpfile p "$2" '(.id? | select(type == "number")) as $id
+         | ($id > 0 and $id == ($id | floor))
+           and ((.family? == "review") or (.submission_type == $p[0].skill))
+           and (.run_id == $p[0].run_id)
+           and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
+}
+
+# af_event_identity_ok <response-file> <payload-file> — same key + machine.
+af_event_identity_ok() {
+  jq -e --slurpfile p "$2" \
+    '(.run_id == $p[0].key) and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
+}
+
+# af_event_response_valid <response-file> <payload-file>
+af_event_response_valid() {
+  jq -e --slurpfile p "$2" '(.id? | select(type == "number")) as $id
+         | ($id > 0 and $id == ($id | floor))
+           and ((.family? == "event") or (.submission_type == $p[0].kind))
+           and (.run_id == $p[0].key)
+           and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
 }
 
 # af_request <METHOD> <path> [payload-file]
@@ -127,21 +225,40 @@ af_transport_reason() {
   esac
 }
 
-# af_spool <prefix> <payload-file> — atomic landing (tmp + mv).
+# af_spool_unwritable <payload-file> — terminal: the payload could not be
+# persisted, so it is echoed to stderr (recoverable from the transcript) and
+# the caller exits 1. "spooled" must never be claimed for a payload that is
+# not durably on disk.
+af_spool_unwritable() {
+  af_warn "spool directory $AF_SPOOL is not writable — the payload was NOT persisted; it is echoed below so it can be recovered from this transcript"
+  cat "$1" >&2 2>/dev/null || true
+  printf '\n' >&2
+  af_outcome "$(jq -cn --arg p "$AF_SPOOL" '{status:"failed",reason:"spool_unwritable",path:$p}')"
+  exit 1
+}
+
+# af_spool <prefix> <payload-file> — atomic landing (tmp + mv). Every step is
+# checked: a failure here means the payload is unrecoverable unless it is
+# reported, so it never falls through to a "spooled" outcome.
 af_spool() {
-  local prefix="$1" payload="$2" name
-  mkdir -p "$AF_SPOOL"
+  local prefix="$1" payload="$2" name tmp
+  prefix=$(printf '%s' "$prefix" | tr -c 'A-Za-z0-9._-' '_')
+  mkdir -p "$AF_SPOOL" 2>/dev/null || af_spool_unwritable "$payload"
   name="$prefix-$(date +%Y%m%d-%H%M%S)-$$-$RANDOM.json"
-  cp "$payload" "$AF_SPOOL/.tmp.$name" && mv "$AF_SPOOL/.tmp.$name" "$AF_SPOOL/$name"
+  tmp="$AF_SPOOL/.tmp.$name"
+  cp "$payload" "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; af_spool_unwritable "$payload"; }
+  mv "$tmp" "$AF_SPOOL/$name" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; af_spool_unwritable "$payload"; }
+  [ -s "$AF_SPOOL/$name" ] || af_spool_unwritable "$payload"
   af_warn "payload spooled to $AF_SPOOL/$name (will retry on the next submit/flush call)"
+  return 0
 }
 
 # One-line human-visible signal that retryable and rejected spool files exist.
 af_backlog_warning() {
   [ -d "$AF_SPOOL" ] || return 0
   local retryable rejected
-  retryable=$(find "$AF_SPOOL" -maxdepth 1 \( -name '*.json' -o -name '*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
-  rejected=$(find "$AF_SPOOL" -maxdepth 1 -name '*.rejected' 2>/dev/null | wc -l | tr -d ' ')
+  retryable=$({ find "$AF_SPOOL" -maxdepth 1 \( -name '*.json' -o -name '*.inflight' \) 2>/dev/null || true; } | wc -l | tr -d ' ')
+  rejected=$({ find "$AF_SPOOL" -maxdepth 1 -name '*.rejected' 2>/dev/null || true; } | wc -l | tr -d ' ')
   [ "$retryable" -gt 0 ] \
     && af_warn "spool backlog: $retryable unsent submission(s) in $AF_SPOOL — the service has been unreachable"
   [ "$rejected" -gt 0 ] \
@@ -149,35 +266,39 @@ af_backlog_warning() {
   return 0
 }
 
-# af_prune_spool — age out entries instead of growing forever. Covers BOTH
-# *.json and *.inflight (an interrupted claim must not survive pruning), plus
-# inspected .rejected files which must not grow without bound.
+# af_prune_spool — age out entries instead of growing forever. Covers *.json,
+# *.inflight (an interrupted claim must not survive pruning) and inspected
+# .rejected files. Every find is guarded: an unreadable spool directory must
+# not abort the caller before it prints its outcome.
 af_prune_spool() {
   [ -d "$AF_SPOOL" ] || return 0
   local old summary
-  find "$AF_SPOOL" -maxdepth 1 \( -name 'review-*.json' -o -name 'review-*.inflight' \) \
-      -mtime +"$AF_REVIEW_MAX_AGE_DAYS" -print 2>/dev/null | while read -r old; do
-    af_warn "dropping spooled review older than ${AF_REVIEW_MAX_AGE_DAYS}d: $(basename "$old")"
-    rm -f "$old"
+  { find "$AF_SPOOL" -maxdepth 1 \
+      \( -name 'review-*.json' -o -name 'review-*.inflight' \
+         -o -name 'event-*.json' -o -name 'event-*.inflight' \) \
+      -mtime +"$AF_REVIEW_MAX_AGE_DAYS" -print 2>/dev/null || true; } | while read -r old; do
+    af_warn "dropping spooled $(basename "$old") older than ${AF_REVIEW_MAX_AGE_DAYS}d"
+    rm -f "$old" 2>/dev/null || true
   done
   # Frictions past the dedupe window can no longer be retried safely (a
   # maybe-delivered original would duplicate) — drop loudly with the summary
   # so a human/agent can re-file if it still matters.
-  find "$AF_SPOOL" -maxdepth 1 \( -name 'friction-*.json' -o -name 'friction-*.inflight' \) \
-      -mmin +"$AF_FRICTION_MAX_AGE_MINS" -print 2>/dev/null | while read -r old; do
+  { find "$AF_SPOOL" -maxdepth 1 \( -name 'friction-*.json' -o -name 'friction-*.inflight' \) \
+      -mmin +"$AF_FRICTION_MAX_AGE_MINS" -print 2>/dev/null || true; } | while read -r old; do
     summary=$(jq -r '.summary // "?"' "$old" 2>/dev/null | head -c 120)
     af_warn "dropping spooled friction older than 20h (past the server dedupe window): $(basename "$old") — summary was: $summary — re-file it if still relevant"
-    rm -f "$old"
+    rm -f "$old" 2>/dev/null || true
   done
-  find "$AF_SPOOL" -maxdepth 1 \( -name 'review-*.rejected' -o -name 'friction-*.rejected' \) \
-      -mtime +"$AF_REJECTED_MAX_AGE_DAYS" -print 2>/dev/null | while read -r old; do
+  { find "$AF_SPOOL" -maxdepth 1 -name '*.rejected' \
+      -mtime +"$AF_REJECTED_MAX_AGE_DAYS" -print 2>/dev/null || true; } | while read -r old; do
     af_warn "dropping rejected spool older than ${AF_REJECTED_MAX_AGE_DAYS}d: $(basename "$old")"
-    rm -f "$old"
+    rm -f "$old" 2>/dev/null || true
   done
+  return 0
 }
 
 # Flush spooled payloads. Claim-by-rename before POSTing; delete on success.
-# Both types are retry-safe (see header), so .json and .inflight are both
+# Every family is retry-safe (see header), so .json and .inflight are both
 # eligible and failure paths just leave the file .inflight for the next flush.
 af_flush_spool() {
   [ -d "$AF_SPOOL" ] || return 0
@@ -185,11 +306,14 @@ af_flush_spool() {
 
   local f claimed endpoint prefix
   for f in "$AF_SPOOL"/review-*.json "$AF_SPOOL"/review-*.inflight \
+           "$AF_SPOOL"/event-*.json "$AF_SPOOL"/event-*.inflight \
            "$AF_SPOOL"/friction-*.json "$AF_SPOOL"/friction-*.inflight; do
     [ -e "$f" ] || continue
     case "$(basename "$f")" in
       review-*) endpoint="/api/v1/reviews"; prefix=review ;;
+      event-*) endpoint="/api/v1/events"; prefix=event ;;
       friction-*) endpoint="/api/v1/frictions"; prefix=friction ;;
+      *) continue ;;
     esac
     claimed="${f%.json}"; claimed="${claimed%.inflight}.inflight"
     if [ "$f" != "$claimed" ]; then
@@ -202,18 +326,27 @@ af_flush_spool() {
         rm -f "$AF_RESP"
         continue
       fi
-      if [ "$prefix" = review ]; then
-        # Trust a 200/201 only if it is OUR record (post-409-API this should
-        # always hold; the check guards against a legacy no-hash row).
-        local want got
-        want=$(jq -r '.run_id + "|" + .machine_name' "$claimed" 2>/dev/null)
-        got=$(jq -r '(.run_id // "") + "|" + .machine_name' "$AF_RESP" 2>/dev/null)
-        if [ "$want" != "$got" ]; then
-          mv "$claimed" "${claimed%.inflight}.rejected" 2>/dev/null || true
-          af_warn "spooled $(basename "$claimed") answered with a different record ($got) — kept as .rejected"
+      if [ "$prefix" = review ] && ! af_review_response_valid "$AF_RESP" "$claimed"; then
+        if af_review_identity_ok "$AF_RESP" "$claimed"; then
+          af_warn "spooled $(basename "$claimed") received a malformed review success response — retaining for retry"
           rm -f "$AF_RESP"
           continue
         fi
+        mv "$claimed" "${claimed%.inflight}.rejected" 2>/dev/null || true
+        af_warn "spooled $(basename "$claimed") answered with a different record — kept as .rejected"
+        rm -f "$AF_RESP"
+        continue
+      fi
+      if [ "$prefix" = event ] && ! af_event_response_valid "$AF_RESP" "$claimed"; then
+        if af_event_identity_ok "$AF_RESP" "$claimed"; then
+          af_warn "spooled $(basename "$claimed") received a malformed event success response — retaining for retry"
+          rm -f "$AF_RESP"
+          continue
+        fi
+        mv "$claimed" "${claimed%.inflight}.rejected" 2>/dev/null || true
+        af_warn "spooled $(basename "$claimed") answered with a different record — kept as .rejected"
+        rm -f "$AF_RESP"
+        continue
       fi
       rm -f "$claimed"
       af_warn "flushed spooled $(basename "$claimed")"
@@ -227,10 +360,11 @@ af_flush_spool() {
       mv "$claimed" "${claimed%.inflight}.rejected" 2>/dev/null || true
       af_warn "spooled $(basename "$claimed") rejected ($AF_HTTP_CODE): $(head -c 300 "$AF_RESP") — kept as .rejected"
     else
-      : # 5xx: stays .inflight for the next flush (both types are retry-safe)
+      : # 5xx: stays .inflight for the next flush (every family is retry-safe)
     fi
     rm -f "$AF_RESP"
   done
+  return 0
 }
 
 # Harness auto-detection. Explicit --harness / AGENT_FEEDBACK_HARNESS always
@@ -248,14 +382,13 @@ af_flush_spool() {
 # CODEX_API_KEY) leak into every session and would false-positive.
 # PI_MODEL/OPENCODE_MODEL are legacy wrapper vars kept as a last resort.
 # omp exports NEITHER marker to its child shells — PI_CODING_AGENT_DIR and
-# OMP_PROFILE are inputs it READS (src/cli.ts), not outputs it sets — so the
-# env branch above never fires and an omp session either inherits CLAUDECODE=1
-# (omp launched from a Claude Code session → misattributed 'claude-code',
-# friction 216, recurred as id 265) or falls through to 'unknown'. Until omp
-# exports a marker, walk the process ancestry for an omp process. Match
-# '@oh-my-pi' (unique to omp's package path) and the omp launcher itself —
-# NEVER bare 'pi-coding-agent', which also matches pi's own package
-# (@earendil-works/pi-coding-agent).
+# OMP_PROFILE are inputs it READS, not outputs it sets — so the env branch
+# above never fires and an omp session either inherits CLAUDECODE=1 (omp
+# launched from a Claude Code session, misattributed as 'claude-code') or falls
+# through to 'unknown'. Until omp exports a marker, walk the process ancestry
+# for an omp process. Match '@oh-my-pi' (unique to omp's package path) and the
+# omp launcher itself — NEVER bare 'pi-coding-agent', which also matches pi's
+# own package (@earendil-works/pi-coding-agent).
 af_has_omp_ancestor() {
   local pid=$$ args i=0
   while [ "$pid" -gt 1 ] && [ "$i" -lt 15 ]; do

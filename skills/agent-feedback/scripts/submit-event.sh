@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Submit a generic write-once event to the agent-feedback service: a free-form
+# JSON payload under a producer-chosen (kind, key). Nothing in the service
+# interprets the payload.
+#
+# Usage:
+#   submit-event.sh --kind K [--key KEY] [--model M] [--machine NAME] \
+#                   (--payload-file F | --stdin) [--dry-run]
+#
+# The payload is the JSON object read from --payload-file or stdin; it is sent
+# verbatim (never through jq's argv, so it may be arbitrarily large).
+#   --kind    producer namespace, e.g. deploy, benchmark. "friction" is
+#             reserved: file those with submit-friction.sh.
+#   --key     idempotency key within the kind. Defaults to
+#             <machine>-<UTC yyyymmdd-HHMMSS>-<pid>. Uniqueness is
+#             (kind, key) service-wide, so keep the machine name in it.
+#   --model   coordinator model; falls back to AGENT_FEEDBACK_MODEL et al.
+#   --machine canonical machine name; falls back to AGENT_FEEDBACK_MACHINE.
+#   --dry-run build and validate the payload, print it, send nothing.
+#
+# Retry semantics match reviews: (kind, key) is idempotent, an identical replay
+# returns the stored record (200) and changed content under the same key is
+# refused (409), so transport failures and 5xx responses are SPOOLED and
+# retried for 30 days.
+# The last stdout line is always a machine-readable outcome:
+#   {"status":"submitted","id":N,"key":"..."} | {"status":"duplicate","id":N,"key":"..."}
+#   {"status":"spooled","key":"...","reason":"..."} | {"status":"mismatch","key":"...","message":"..."}
+#   {"status":"rejected",...} | {"status":"failed","reason":"spool_unwritable",...}
+#   {"status":"valid"} (dry-run)
+# Exit 0 for submitted/duplicate/spooled/valid; 1 for rejected/mismatch/failed.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_common.sh
+. "$SCRIPT_DIR/_common.sh"
+
+KIND="" KEY="" MODEL="" MACHINE="" PAYLOAD_SRC="" STDIN_MODE=0 DRY_RUN=0
+
+af_require_deps
+
+WORKDIR=$(mktemp -d) || af_die "could not create a temporary directory"
+trap 'rm -rf "$WORKDIR"; rm -f "${AF_RESP:-}"' EXIT
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --kind)         KIND="${2:-}"; shift 2 ;;
+    --key)          KEY="${2:-}"; shift 2 ;;
+    --model)        MODEL="${2:-}"; shift 2 ;;
+    --machine)      MACHINE="${2:-}"; shift 2 ;;
+    --payload-file) PAYLOAD_SRC="${2:-}"; shift 2 ;;
+    --stdin)        STDIN_MODE=1; shift ;;
+    --dry-run)      DRY_RUN=1; shift ;;
+    *) af_die "unknown flag: $1 (see header for usage)" ;;
+  esac
+done
+
+BODY="$WORKDIR/body.json"
+if [ "$STDIN_MODE" = 1 ] && [ -n "$PAYLOAD_SRC" ]; then
+  af_die "--payload-file and --stdin are mutually exclusive"
+elif [ "$STDIN_MODE" = 1 ]; then
+  cat >"$BODY"
+elif [ -n "$PAYLOAD_SRC" ]; then
+  [ -f "$PAYLOAD_SRC" ] || af_die "not a file: $PAYLOAD_SRC"
+  cp "$PAYLOAD_SRC" "$BODY"
+else
+  af_die "one of --payload-file or --stdin is required (see header for usage)"
+fi
+
+jq -e 'type == "object"' "$BODY" >/dev/null 2>&1 \
+  || af_reject "event payload must be a single JSON object"
+
+[ -n "$MODEL" ]   || MODEL=$(af_detect_model)
+[ -n "$MACHINE" ] || MACHINE=$(af_machine)
+
+KIND=$(af_trim "$KIND")
+KEY=$(af_trim "$KEY")
+MACHINE=$(af_trim "$MACHINE")
+MODEL=$(af_trim "$MODEL")
+
+af_check_required "--kind" "$KIND"
+[ "$KIND" != "friction" ] || af_reject "kind \"friction\" is reserved — use submit-friction.sh"
+[ -n "$KEY" ] || KEY="$MACHINE-$(date -u +%Y%m%d-%H%M%S)-$$"
+af_check_required "machine_name" "$MACHINE"
+af_check_required "--model" "$MODEL"
+af_check_identifier "kind" "$KIND"
+af_check_identifier "key" "$KEY"
+af_check_identifier "machine_name" "$MACHINE"
+af_check_identifier "coordinator_model" "$MODEL"
+
+PAYLOAD="$WORKDIR/payload.json"
+jq -n --arg kind "$KIND" --arg key "$KEY" \
+  --arg machine "$MACHINE" --arg model "$MODEL" \
+  --slurpfile body "$BODY" \
+  '{kind: $kind, key: $key, machine_name: $machine,
+    coordinator_model: $model, payload: $body[0]}' >"$PAYLOAD"
+
+if [ "$DRY_RUN" = 1 ]; then
+  cat "$PAYLOAD"
+  echo
+  af_outcome '{"status":"valid"}'
+  exit 0
+fi
+
+af_require_key
+af_flush_spool
+
+af_request POST "/api/v1/events" "$PAYLOAD"
+case "$AF_HTTP_CODE" in
+  201|200)
+    # Trust a 2xx only when the returned record is OUR event: positive integer
+    # id, our family/kind, our key and machine.
+    if af_event_response_valid "$AF_RESP" "$PAYLOAD"; then
+      if [ "$AF_HTTP_CODE" = 201 ]; then
+        af_outcome "$(jq -c --arg key "$KEY" '{status:"submitted",id:.id,key:$key}' "$AF_RESP")"
+      else
+        af_outcome "$(jq -c --arg key "$KEY" '{status:"duplicate",id:.id,key:$key}' "$AF_RESP")"
+      fi
+    elif ! af_event_identity_ok "$AF_RESP" "$PAYLOAD"; then
+      af_warn "key collision: server returned a different record for $KEY"
+      af_outcome "$(jq -cn --arg key "$KEY" '{status:"collision",key:$key}')"
+      exit 1
+    else
+      af_warn "malformed event success response — spooling for retry"
+      af_spool "event" "$PAYLOAD"
+      af_outcome "$(jq -cn --arg key "$KEY" '{status:"spooled",key:$key,reason:"malformed_success_response"}')"
+    fi
+    ;;
+  000)
+    af_warn "service unreachable (curl exit $AF_CURL_EXIT) — spooling"
+    af_spool "event" "$PAYLOAD"
+    af_outcome "$(jq -cn --arg key "$KEY" --arg r "$(af_transport_reason)" '{status:"spooled",key:$key,reason:$r}')"
+    ;;
+  409)
+    af_outcome "$(jq -cn --arg key "$KEY" --arg msg "$(jq -r '.message // ""' "$AF_RESP" 2>/dev/null | head -c 400)" \
+      '{status:"mismatch",key:$key,message:$msg}')"
+    exit 1
+    ;;
+  4*)
+    af_outcome "$(jq -cn --arg key "$KEY" --argjson code "$AF_HTTP_CODE" --arg msg "$(jq -r '.message // ""' "$AF_RESP" 2>/dev/null | head -c 400)" \
+      '{status:"rejected",key:$key,http_status:$code,message:$msg}')"
+    exit 1
+    ;;
+  *)
+    af_warn "server error $AF_HTTP_CODE — spooling for retry (idempotent)"
+    af_spool "event" "$PAYLOAD"
+    af_outcome "$(jq -cn --arg key "$KEY" --argjson code "$AF_HTTP_CODE" '{status:"spooled",key:$key,reason:("server_error_"+($code|tostring))}')"
+    ;;
+esac
+af_backlog_warning

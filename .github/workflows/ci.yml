@@ -14,70 +14,38 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18.6-alpine
-        env:
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: feedback_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
       - uses: taiki-e/install-action@v2.87.7
         with:
           tool: just
-      - name: Install SQL generator
-        run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
-      - name: just check and generated SQL cleanliness
+      - name: just check and tree cleanliness
         run: |
-          just --justfile backend/services/feedback/justfile check
+          just check
           git diff --exit-code
-      - name: race tests (integration tests run against the PostgreSQL service)
-        working-directory: backend
-        env:
-          TEST_POSTGRES_URL: postgres://postgres:test@127.0.0.1:5432/feedback_test?sslmode=disable
+      - name: race tests
         run: go test -race -count=1 ./...
       - name: live HTTP end-to-end API contract
         env:
           E2E_API_KEY: ci-e2e-api-${{ github.run_id }}-${{ github.run_attempt }}
-          E2E_POSTGRES_PASSWORD: ci-e2e-db-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          docker run --detach --rm --name feedback-e2e-postgres \
-            --env POSTGRES_USER=feedback \
-            --env POSTGRES_PASSWORD="$E2E_POSTGRES_PASSWORD" \
-            --env POSTGRES_DB=feedback_e2e \
-            --publish 127.0.0.1:15432:5432 postgres:18.6-alpine
+          workdir=$(mktemp -d)
           feedback_pid=
           cleanup() {
             if [ -n "$feedback_pid" ]; then
               kill -TERM "$feedback_pid" 2>/dev/null || true
               wait "$feedback_pid" || true
             fi
-            docker rm --force feedback-e2e-postgres >/dev/null 2>&1 || true
+            rm -rf "$workdir"
           }
           trap cleanup EXIT
-          # Require TCP readiness, not the socket-only initialization server.
-          for _ in $(seq 1 30); do
-            if docker exec feedback-e2e-postgres pg_isready -h 127.0.0.1 -U feedback -d feedback_e2e >/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          docker exec feedback-e2e-postgres pg_isready -h 127.0.0.1 -U feedback -d feedback_e2e >/dev/null
-          E2E_POSTGRES_URL="postgres://feedback:${E2E_POSTGRES_PASSWORD}@127.0.0.1:15432/feedback_e2e?sslmode=disable"
-          API_KEY="$E2E_API_KEY" POSTGRES_URL="$E2E_POSTGRES_URL" \
-            HTTP_LISTEN_ADDR=127.0.0.1:18080 ENV_MODE=ci ./backend/bin/feedback &
+          API_KEY="$E2E_API_KEY" DATABASE_PATH="$workdir/feedback.db" \
+            HTTP_LISTEN_ADDR=127.0.0.1:18080 ./bin/feedback &
           feedback_pid=$!
           for _ in $(seq 1 30); do
             if curl --fail --silent --show-error http://127.0.0.1:18080/ready >/dev/null; then
@@ -96,6 +64,13 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           cd skills/agent-feedback/scripts && shellcheck -x ./*.sh
+      - name: shellcheck triage scripts
+        run: |
+          if ls skills/feedback-triage/scripts/*.sh >/dev/null 2>&1; then
+            cd skills/feedback-triage/scripts && shellcheck -x ./*.sh
+          else
+            echo "no feedback-triage scripts yet, skipping"
+          fi
       - name: hermetic client tests (mock server with isolated HOME)
         run: bash tests/skill/run-tests.sh
 
@@ -118,8 +93,8 @@ jobs:
       - name: build and push multi-architecture image
         uses: docker/build-push-action@v7.3.0
         with:
-          context: backend
-          file: backend/services/feedback/Dockerfile
+          context: .
+          file: Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |

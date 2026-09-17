@@ -1,56 +1,47 @@
 # agent-feedback
 
-**A self-hosted inbox for feedback from AI coding agents.** The Go API stores
-multi-model review results and tooling or documentation friction reports in
-PostgreSQL. The included Bash skill submits, queries, and marks that feedback
-processed.
+A self-hosted inbox for feedback from AI coding agents. Agents on any machine,
+in any harness, report what slowed them down; later an agent triages the queue
+with a human and fixes the causes. Go, SQLite, one container, one API key.
 
-Use it to make feedback from separate agent sessions and machines actionable in
-one place. It is a telemetry store—not a review runner, benchmark, dashboard,
-or automated processor.
+Two parts:
 
-## Features
-
-- Write-once review and friction submissions, with replay protection and
-  friction duplicate absorption.
-- Filtered retrieval and batch processed/unprocessed marking.
-- API-key authentication, automatic PostgreSQL migrations, health/readiness,
-  Prometheus metrics, and optional OpenTelemetry tracing.
-- A harness-agnostic client skill with local spooling and retry on a later
-  invocation.
+| Part | What it is | Where |
+|---|---|---|
+| **The service** | HTTP API that stores write-once submissions (frictions, review runs, events) and a processed mark | this repository, one binary |
+| **Two skills** | `agent-feedback`: submit and read, installed for every harness on every machine. `feedback-triage`: process the queue on demand | [`skills/`](skills/) |
 
 ## Start here
 
-The current stable source release is [v1.0.1](https://github.com/foae/agent-feedback/releases/tag/v1.0.1).
-Clone it and check out the tag for a fixed snapshot:
+| You want to | Read |
+|---|---|
+| Install the skill and file feedback from an agent | [`skills/agent-feedback/SKILL.md`](skills/agent-feedback/SKILL.md) |
+| Triage the queue | [`skills/feedback-triage/SKILL.md`](skills/feedback-triage/SKILL.md) |
+| Call the API directly | [`docs/api.md`](docs/api.md) |
+| Run, deploy, back up, migrate | [`docs/operate.md`](docs/operate.md) |
+| Change the code | [`CLAUDE.md`](CLAUDE.md) then [`docs/develop.md`](docs/develop.md) |
+| Trust boundary and credentials | [`docs/security.md`](docs/security.md) |
+| Versions and upgrade notes | [`docs/releases.md`](docs/releases.md) |
+
+## Five-minute local run
 
 ```bash
-git clone https://github.com/foae/agent-feedback.git
-cd agent-feedback
-git checkout v1.0.1
+git clone https://github.com/foae/agent-feedback.git && cd agent-feedback
+git checkout v2.0.0
+cd infra/agent-feedback && umask 077 && printf 'API_KEY=%s\n' "$(openssl rand -hex 32)" > .env
+docker compose up -d --build --wait
+export AGENT_FEEDBACK_URL=http://127.0.0.1:8090 AGENT_FEEDBACK_API_KEY=$(sed -n 's/^API_KEY=//p' .env)
+bash ../../skills/agent-feedback/scripts/submit-friction.sh --category test --summary "hello" --model manual
+bash ../../skills/agent-feedback/scripts/process.sh list
 ```
 
-For a local stack, you need Git, Docker with Compose 2.24.4 or newer, Bash,
-`curl`, and `openssl`. Follow the [getting-started guide](docs/getting-started.md)
-for the configuration and first request. The bundled client additionally needs
-`jq`.
+Needs Docker with Compose, `curl`, `jq`, `openssl`. The service binds
+`127.0.0.1:8090`; the database lives in a named volume.
 
-## Documentation
+## What it is not
 
-- [Getting started](docs/getting-started.md) — local installation, configuration,
-  first API request, and client skill.
-- [Security](docs/security.md) — trust boundary, credentials, network exposure,
-  submitted data, and retention.
-- [Development](docs/development.md) — source setup, checks, tests, and code
-  conventions.
-- [Deployment](docs/deployment.md) — image-based SSH deployment and remote stack
-  configuration.
-- [Operations](docs/operations.md) — probes, backups, restoration, retention,
-  and key rotation.
-- [API contract](docs/agent-usage.md) — endpoint schemas, limits, errors, and
-  idempotency.
-- [Architecture](docs/architecture.md), [conventions](docs/conventions.md),
-  [patterns](docs/patterns.md), and [extension guide](docs/adding-a-service.md).
-- [Releases](docs/releases.md) — versioning, publication, and upgrade notes.
+Not a review runner, benchmark, dashboard or automated fixer. It stores what
+agents report and lets a processor work through it. Records are never
+overwritten: a correction is a new submission.
 
-The project is licensed under the [MIT License](LICENSE).
+MIT licensed. Current stable release: [v2.0.0](https://github.com/foae/agent-feedback/releases/tag/v2.0.0).

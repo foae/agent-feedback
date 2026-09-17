@@ -1,29 +1,38 @@
 #!/usr/bin/env bash
 # Process agent-feedback submissions from any machine: list what's unprocessed,
-# mark submissions processed after acting on them, unmark mistakes.
+# mark submissions processed (with what was done) after acting on them, undo
+# mistakes.
 #
 # Usage:
-#   process.sh list [--type T] [--machine M] [--limit N] [--all] [--json]
-#   process.sh done <id> [<id>...]     # mark processed
+#   process.sh list [--family F] [--type T] [--machine M] [--include-processed]
+#                   [--limit N] [--json]
+#   process.sh done <id> [<id>...] [--resolution "what was done"]
 #   process.sh undo <id> [<id>...]     # clear the processed mark
 #
-# `list` shows unprocessed submissions (processed=false) unless --all is given.
+# `list` shows ONLY unprocessed submissions (processed=false) unless
+# --include-processed is given, and fetches EVERY page: it follows the server's
+# next_before_id cursor until has_more is false, so the output is the whole
+# queue, not one page of it. --limit N caps the total number of rows returned.
+# The server's total for the filter is printed to stderr as "total: N".
 # Default output is one TSV line per submission:
-#   id  type  machine  category-or-run_id  summary
-# --json prints the raw server response instead.
+#   id  family  type  machine  category-or-run_id  summary
+# --json prints one merged object: {"submissions":[...all pages...],"total":N}
 #
 # `done`/`undo` print the server's classification verbatim as the outcome:
-#   {"processed":true,"updated":[43],"unchanged":[],"not_found":[999]}
-# Exit 1 when the server rejects the request or is unreachable.
+#   {"processed":true,"resolution":"...","updated":[43],"unchanged":[],"not_found":[999]}
+# One --resolution applies to the whole batch; run one command per distinct
+# resolution. Exit 1 when the server rejects the request or is unreachable.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_common.sh
 . "$SCRIPT_DIR/_common.sh"
 
+AF_PAGE_SIZE=500
+
 usage() {
-  echo "usage: process.sh list [--type T] [--machine M] [--limit N] [--all] [--json]" >&2
-  echo "       process.sh done <id> [<id>...]" >&2
+  echo "usage: process.sh list [--family F] [--type T] [--machine M] [--include-processed] [--limit N] [--json]" >&2
+  echo "       process.sh done <id> [<id>...] [--resolution \"what was done\"]" >&2
   echo "       process.sh undo <id> [<id>...]" >&2
   exit 1
 }
@@ -31,11 +40,27 @@ usage() {
 af_require_deps
 af_require_key
 
-set_processed() { # <true|false> <id...>
+set_processed() { # <true|false> <id...> [--resolution TEXT]
   local processed="$1"; shift
-  [ $# -gt 0 ] || usage
+  local resolution="" have_resolution=0
+  local -a ids=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --resolution) resolution="${2:-}"; have_resolution=1; shift 2 ;;
+      -*) usage ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ "${#ids[@]}" -gt 0 ] || usage
+  if [ "$have_resolution" = 1 ]; then
+    [ "$processed" = true ] || af_die "--resolution is only valid with 'done' (the server rejects it when unmarking)"
+    resolution=$(af_trim "$resolution")
+    [ -n "$resolution" ] || af_reject "--resolution must not be blank"
+    af_check_summary "resolution" "$resolution"
+  fi
+
   local id ids_json="[]"
-  for id in "$@"; do
+  for id in "${ids[@]}"; do
     [[ "$id" =~ ^[0-9]+$ ]] || af_die "not a numeric submission id: $id"
     ids_json=$(jq -cn --argjson acc "$ids_json" --argjson id "$id" '$acc + [$id]')
   done
@@ -45,7 +70,10 @@ set_processed() { # <true|false> <id...>
   # ${payload:-}: payload is local — by the time the EXIT trap fires it is out
   # of scope, and set -u would abort the exit path on a bare "$payload".
   trap 'rm -f "${payload:-}" "${AF_RESP:-}"' EXIT
-  jq -cn --argjson ids "$ids_json" --argjson p "$processed" '{ids: $ids, processed: $p}' >"$payload"
+  jq -cn --argjson ids "$ids_json" --argjson p "$processed" \
+    --arg resolution "$resolution" --argjson have "$have_resolution" \
+    '{ids: $ids, processed: $p}
+     + (if $have == 1 then {resolution: $resolution} else {} end)' >"$payload"
 
   af_flush_spool
   af_request POST "/api/v1/submissions/processed" "$payload"
@@ -60,51 +88,71 @@ set_processed() { # <true|false> <id...>
 }
 
 list_cmd() {
-  local as_json=0 all=0 limit=50
-  declare -a PARAMS=()
+  local as_json=0 include_processed=0 limit=0
+  local -a FILTERS=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --type)    PARAMS+=(--data-urlencode "type=${2:-}"); shift 2 ;;
-      --machine) PARAMS+=(--data-urlencode "machine=${2:-}"); shift 2 ;;
-      # limit is a plain variable, not appended to PARAMS here: the old code
-      # seeded PARAMS with limit=50 and --limit APPENDED a second limit param
-      # — the server honors the FIRST, so --limit was silently a no-op and a
-      # 54-row queue looked like exactly 50 (friction 316).
-      --limit)   limit="${2:-50}"; shift 2 ;;
-      --all)     all=1; shift ;;
-      --json)    as_json=1; shift ;;
+      --family)  FILTERS+=(--data-urlencode "family=${2:-}"); shift 2 ;;
+      --type)    FILTERS+=(--data-urlencode "type=${2:-}"); shift 2 ;;
+      --machine) FILTERS+=(--data-urlencode "machine=${2:-}"); shift 2 ;;
+      --limit)
+        limit="${2:-0}"
+        [[ "$limit" =~ ^[0-9]+$ ]] || af_die "--limit must be a non-negative integer"
+        shift 2 ;;
+      --include-processed) include_processed=1; shift ;;
+      --all) af_die "--all was replaced by --include-processed (list defaults to unprocessed only)" ;;
+      --json) as_json=1; shift ;;
       *) usage ;;
     esac
   done
-  PARAMS+=(--data-urlencode "limit=$limit")
-  [ "$all" = 1 ] || PARAMS+=(--data-urlencode "processed=false")
+  [ "$include_processed" = 1 ] || FILTERS+=(--data-urlencode "processed=false")
 
-  af_request_get "/api/v1/submissions" "${PARAMS[@]}"
-  trap 'rm -f "${AF_RESP:-}"' EXIT
-  if [ "$AF_HTTP_CODE" = 200 ]; then
-    if [ "$as_json" = 1 ]; then
-      cat "$AF_RESP"; echo
-    else
-      jq -r '.submissions[] | [
-          .id, .submission_type, .machine_name,
-          (.category // .run_id // "-"),
-          ((.summary // "-") | gsub("[\\n\\t]"; " ") | .[0:160])
-        ] | @tsv' "$AF_RESP"
-      # A result set exactly at the limit almost always means truncation —
-      # say so instead of letting the caller mistake a page for the queue
-      # (friction 221: a 64-row backlog read as "50, all of it").
-      local __n
-      __n=$(jq '.submissions | length' "$AF_RESP" 2>/dev/null || echo 0)
-      if [ "$__n" -ge "$limit" ]; then
-        af_warn "showing $__n row(s) — at the --limit cap; there may be more (re-run with a larger --limit)"
-      fi
+  local work rows total=0 before_id="" page_limit fetched=0
+  work=$(mktemp -d) || af_die "could not create a temporary directory"
+  trap 'rm -rf "${work:-}"; rm -f "${AF_RESP:-}"' EXIT
+  rows="$work/rows.ndjson"
+  : >"$rows"
+
+  # Keyset pagination: follow next_before_id until the server says there is
+  # nothing older. One page is never the queue.
+  while :; do
+    page_limit="$AF_PAGE_SIZE"
+    if [ "$limit" -gt 0 ]; then
+      local remaining=$((limit - fetched))
+      [ "$remaining" -gt 0 ] || break
+      [ "$remaining" -lt "$page_limit" ] && page_limit="$remaining"
     fi
-  elif [ "$AF_HTTP_CODE" = 000 ]; then
-    af_die "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
+    local -a PARAMS=("${FILTERS[@]}" --data-urlencode "limit=$page_limit")
+    [ -n "$before_id" ] && PARAMS+=(--data-urlencode "before_id=$before_id")
+    af_request_get "/api/v1/submissions" "${PARAMS[@]}"
+    if [ "$AF_HTTP_CODE" = 000 ]; then
+      af_die "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
+    elif [ "$AF_HTTP_CODE" != 200 ]; then
+      af_warn "HTTP $AF_HTTP_CODE: $(head -c 400 "$AF_RESP")"
+      exit 1
+    fi
+    jq -c '.submissions[]?' "$AF_RESP" >>"$rows"
+    total=$(jq -r '.total // 0' "$AF_RESP")
+    fetched=$(wc -l <"$rows" | tr -d ' ')
+    local has_more next
+    has_more=$(jq -r 'if .has_more then "1" else "0" end' "$AF_RESP")
+    next=$(jq -r '.next_before_id // empty' "$AF_RESP")
+    rm -f "$AF_RESP"
+    [ "$has_more" = 1 ] || break
+    [ -n "$next" ] || break
+    before_id="$next"
+  done
+
+  if [ "$as_json" = 1 ]; then
+    jq -sc --argjson total "$total" '{submissions: ., total: $total}' "$rows"
   else
-    af_warn "HTTP $AF_HTTP_CODE: $(head -c 400 "$AF_RESP")"
-    exit 1
+    jq -r '[
+        .id, (.family // "-"), .submission_type, .machine_name,
+        (.category // .run_id // "-"),
+        ((.summary // "-") | gsub("[\\n\\t]"; " ") | .[0:160])
+      ] | @tsv' "$rows"
   fi
+  echo "total: $total" >&2
 }
 
 case "${1:-}" in

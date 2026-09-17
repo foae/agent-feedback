@@ -6,6 +6,10 @@
 # Lives OUTSIDE skills/agent-feedback/ on purpose: the skill directory is
 # distributed as-is, and test tooling must never travel with it.
 #
+# Portable to macOS and Linux: no GNU-only flags (no `touch -d`), and every
+# path comparison uses the canonical (symlink-resolved) form, because macOS
+# temp dirs are /var/... symlinks onto /private/var/....
+#
 # Usage: bash tests/skill/run-tests.sh
 # Requires: bash, curl, jq, python3.
 set -u
@@ -14,6 +18,7 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS="$TESTS_DIR/../../skills/agent-feedback/scripts"
 
 WORK=$(mktemp -d)
+WORK=$(cd "$WORK" && pwd -P)   # canonical: /private/var/... on macOS
 STATE="$WORK/state"
 mkdir -p "$STATE"
 export HOME="$WORK/home"
@@ -22,7 +27,7 @@ SPOOL="$HOME/.cache/agent-feedback/spool"
 
 python3 "$TESTS_DIR/mock_server.py" "$STATE" &
 SERVER_PID=$!
-trap 'kill "$SERVER_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+trap 'kill "$SERVER_PID" 2>/dev/null; chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 for i in $(seq 1 50); do [ -s "$STATE/port" ] && break; sleep 0.1; done
 [ -s "$STATE/port" ] || { echo "FATAL mock server did not start" >&2; exit 1; }
@@ -37,6 +42,7 @@ unset REVIEW_CALLER_MODEL AI_AGENT CLAUDE_EFFORT CLAUDE_CODE_SESSION_ID \
       AGENT_FEEDBACK_SESSION_ID AGENT_FEEDBACK_HARNESS AGENT_FEEDBACK_MODEL \
       CLAUDECODE OPENCODE OPENCODE_MODEL OPENCODE_API_KEY PI_CODING_AGENT \
       PI_CODING_AGENT_DIR OMP_PROFILE PI_MODEL CODEX_SANDBOX CODEX_API_KEY \
+      REVIEW_LOG_DIR AGENT_FEEDBACK_REVIEW_DIRS \
       2>/dev/null || true
 # Run everything from a non-git temp cwd so auto-detected context (cwd, git)
 # is deterministic regardless of where the suite was invoked.
@@ -48,6 +54,12 @@ chk() { # chk <desc> <ok 0|1>
   else fail=$((fail+1)); echo "FAIL  $1"; fi
 }
 set_mode() { printf '%s' "$1" >"$STATE/mode"; }
+set_list_rows() { printf '%s' "$1" >"$STATE/list_rows"; }
+# Portable mtime setter: `touch -d '8 days ago'` is GNU-only.
+set_mtime() { # <path> <seconds ago>
+  python3 -c 'import os,sys,time; p=sys.argv[1]; t=time.time()-float(sys.argv[2]); os.utime(p,(t,t))' "$1" "$2"
+}
+realpath_of() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 log_len() {
   if [ -f "$STATE/requests.jsonl" ]; then
     wc -l <"$STATE/requests.jsonl" | tr -d ' '
@@ -57,6 +69,8 @@ log_len() {
 }
 last_req() { tail -n1 "$STATE/requests.jsonl"; }
 outcome() { tail -n1 <<<"$1"; }
+
+set_list_rows 1
 
 # A missing endpoint must fail locally, without sending to a default service.
 before=$(log_len)
@@ -90,6 +104,20 @@ req=$(last_req)
 chk "friction --stdin prose intact" "$(jq -r --arg d "$prose" \
   'if .body.details==$d and .body.summary=="stdin summary" and .body.harness=="pi" then 1 else 0 end' <<<"$req")"
 
+# 2a. Prose far past the OS per-argument limit (128 KiB) must survive: nothing
+# large may travel through jq's argv.
+python3 -c '
+import json,sys
+json.dump({"category":"tooling","summary":"big prose",
+           "details":"D"*300000,"suggested_fix":"F"*150000}, sys.stdout)' >"$WORK/big.json"
+out=$(bash "$SCRIPTS/submit-friction.sh" --stdin --model m <"$WORK/big.json" 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+req=$(last_req)
+chk "friction 300 KB details via --stdin is built and sent intact" "$(jq -r --argjson rc "$rc" '
+  if $rc==0 and (.body.details|length)==300000 and (.body.suggested_fix|length)==150000
+  then 1 else 0 end' <<<"$req")"
+
 # 3. --stdin unknown key -> rejected locally, nothing sent
 before=$(log_len)
 out=$(bash "$SCRIPTS/submit-friction.sh" --stdin 2>/dev/null <<'JSON'
@@ -110,6 +138,24 @@ chk "friction --dry-run -> valid, no request" "$(jq -n --arg last "$(outcome "$o
   --arg payload "$(sed '$d' <<<"$out")" --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
   '($last|fromjson) as $j | ($payload|fromjson) as $p |
    if $j.status=="valid" and $p.category=="config" and $rc==0 and $b==$a then 1 else 0 end')"
+
+# 4a. --dry-run validates what the server validates: blank-after-trim is not a
+# value, and identifier limits are enforced locally.
+before=$(log_len)
+out=$(bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "   " --model m --dry-run 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+chk "whitespace-only summary -> rejected by --dry-run, no request" "$(jq -n --arg o "$o" \
+  --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
+  '($o|fromjson) as $j | if $j.status=="rejected" and ($j.message|test("summary")) and $rc==1 and $b==$a then 1 else 0 end')"
+before=$(log_len)
+out=$(bash "$SCRIPTS/submit-friction.sh" --category "$(python3 -c 'print("c"*201)')" \
+  --summary "over-long category" --model m 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+chk "over-long category -> rejected locally, no request" "$(jq -n --arg o "$o" \
+  --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
+  '($o|fromjson) as $j | if $j.status=="rejected" and ($j.message|test("category")) and $rc==1 and $b==$a then 1 else 0 end')"
 
 # 5. duplicate absorption: 200 -> duplicate, exit 0
 set_mode duplicate
@@ -148,6 +194,34 @@ flushed_ok=$(jq -r 'select(.body.summary=="offline friction") | 1' "$STATE/reque
 chk "next call flushes spooled friction" "$(jq -n --argjson n "$n_spool" --argjson sent "$sent" \
   --argjson f "${flushed_ok:-0}" 'if $n==0 and $sent==2 and $f==1 then 1 else 0 end')"
 
+# 7a. A spool that cannot be written must NEVER report "spooled": the payload
+# is echoed to stderr instead and the outcome says so.
+chmod 555 "$SPOOL"
+export AGENT_FEEDBACK_URL="http://127.0.0.1:1"
+err="$WORK/spool-fail.err"
+out=$(bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "unspoolable" --model m 2>"$err")
+rc=$?
+o=$(outcome "$out")
+export AGENT_FEEDBACK_URL="$saved_url"
+echoed=$(grep -c 'unspoolable' "$err")
+n_spool=$(find "$SPOOL" -name 'friction-*' 2>/dev/null | wc -l | tr -d ' ')
+chmod 755 "$SPOOL"
+chk "read-only spool -> failed outcome, exit 1, payload echoed to stderr" "$(jq -n --arg o "$o" \
+  --argjson rc "$rc" --argjson e "$echoed" --argjson n "$n_spool" \
+  '($o|fromjson) as $j |
+   if $j.status=="failed" and $j.reason=="spool_unwritable" and ($j.path|length>0)
+      and $rc==1 and $e>=1 and $n==0 then 1 else 0 end')"
+
+# 7b. An unreadable spool directory must not swallow the outcome line.
+chmod 000 "$SPOOL"
+set_mode created
+out=$(bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "unreadable spool" --model m 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+chmod 755 "$SPOOL"
+chk "unreadable spool still prints an outcome" "$(jq -n --arg o "$o" --argjson rc "$rc" \
+  '($o|fromjson) as $j | if $j.status=="submitted" and $rc==0 then 1 else 0 end')"
+
 # 8. 500 -> spooled (dedupe-safe retry), then flushed on next call
 set_mode error500
 out=$(bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "s500" --model m 2>/dev/null)
@@ -182,7 +256,7 @@ for ((i = 1; i <= $#; i++)); do
   fi
   prev="$arg"
 done
-printf '{"id":101,"submission_type":"friction"}' >"$out"
+printf '{"id":101,"family":"friction","submission_type":"friction"}' >"$out"
 printf 201
 SH
 chmod +x "$FAKE_BIN/curl"
@@ -225,36 +299,39 @@ bash "$SCRIPTS/query.sh" --type friction --flush >/dev/null 2>&1
 n_spool=$(find "$SPOOL" \( -name 'friction-*.json' -o -name 'friction-*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
 chk "well-formed later friction receipt clears retained spool" "$([ "$n_spool" = 0 ] && echo 1 || echo 0)"
 
-# 8d. Rejected reports are visible until their bounded retention expires.
+# 8d. Rejected reports are visible until their bounded retention expires (30d).
 mkdir -p "$SPOOL"
 printf '{"summary":"expired rejected"}' >"$SPOOL/friction-expired.rejected"
-touch -d '8 days ago' "$SPOOL/friction-expired.rejected"
+set_mtime "$SPOOL/friction-expired.rejected" $((31 * 86400))
 out=$(bash "$SCRIPTS/query.sh" --type friction --flush 2>&1)
 expired_gone=$([ ! -e "$SPOOL/friction-expired.rejected" ] && echo 1 || echo 0)
 printf '{"summary":"fresh rejected"}' >"$SPOOL/friction-fresh.rejected"
+set_mtime "$SPOOL/friction-fresh.rejected" $((20 * 86400))
 out=$(bash "$SCRIPTS/query.sh" --type friction --flush 2>&1)
+retained_20d=$([ -e "$SPOOL/friction-fresh.rejected" ] && echo 1 || echo 0)
 case "$out" in *"spool backlog: 1 rejected submission"*) rejected_visible=1 ;; *) rejected_visible=0 ;; esac
-chk "rejected spool has bounded retention and a visible backlog warning" \
-  "$([ "$expired_gone" = 1 ] && [ "$rejected_visible" = 1 ] && echo 1 || echo 0)"
+chk "rejected spool retention is 30d with a visible backlog warning" \
+  "$([ "$expired_gone" = 1 ] && [ "$retained_20d" = 1 ] && [ "$rejected_visible" = 1 ] && echo 1 || echo 0)"
 rm -f "$SPOOL/friction-fresh.rejected"
 
-# 8a. auto-context outside a git repo: base keys present, git keys absent
+# 8e. auto-context outside a git repo: base keys present, git keys absent
 set_mode created
 bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "ctx nogit" --model m >/dev/null 2>&1
 req=$(last_req)
-chk "context auto-collected (non-git): base keys, no git keys" "$(jq -r --arg cwd "$PWD" '
+chk "context auto-collected (non-git): base keys, no git keys" "$(jq -r --arg cwd "$(realpath_of "$PWD")" '
   if (.body.context.occurred_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))
   and .body.context.cwd==$cwd
   and (.body.context.os | length > 0) and (.body.context.arch | length > 0)
-  and .body.context.client_version=="2.1"
+  and .body.context.client_version=="3.0"
   and (.body.context | has("git_commit") | not)
   and (.body.context | has("session_id") | not)
   then 1 else 0 end' <<<"$req")"
 
-# 8b. git context: repo/branch/commit/dirty detected, remote token stripped,
+# 8f. git context: repo/branch/commit/dirty detected, remote token stripped,
 #     project auto-derived from the remote
 GITDIR="$WORK/myrepo"
 mkdir -p "$GITDIR"
+GITDIR=$(realpath_of "$GITDIR")
 git -C "$GITDIR" -c init.defaultBranch=main init -q
 git -C "$GITDIR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 git -C "$GITDIR" remote add origin "https://user:tok123@example.com/org/myrepo.git?access_token=leak#fragment"
@@ -270,7 +347,7 @@ chk "context git fields + sanitized remote + auto project" "$(jq -r --arg root "
   and .body.context.repo_root==$root
   then 1 else 0 end' <<<"$req")"
 
-# 8c. SCP-style usernames are also collection-only metadata, while caller
+# 8g. SCP-style usernames are also collection-only metadata, while caller
 # context remains untouched by sanitization.
 git -C "$GITDIR" remote set-url origin "gituser@example.com:org/scprepo.git"
 (cd "$GITDIR" && bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "ctx scp" --model m >/dev/null 2>&1)
@@ -283,7 +360,7 @@ req=$(last_req)
 chk "explicit context remote is not rewritten" "$(jq -r '
   if .body.context.git_remote=="https://caller:keep@example.com/p.git?keep#keep" then 1 else 0 end' <<<"$req")"
 
-# 8c. session/agent/effort picked up from the environment when present
+# 8h. session/agent/effort picked up from the environment when present
 AGENT_FEEDBACK_SESSION_ID="sess-123" AI_AGENT="test-harness_9" CLAUDE_EFFORT="high" \
   bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "ctx env" --model m >/dev/null 2>&1
 req=$(last_req)
@@ -291,7 +368,7 @@ chk "context session/agent/effort from env" "$(jq -r '
   if .body.context.session_id=="sess-123" and .body.context.agent=="test-harness_9"
   and .body.context.effort=="high" then 1 else 0 end' <<<"$req")"
 
-# 8d. --stdin "context" object merges over the auto-collected one
+# 8i. --stdin "context" object merges over the auto-collected one
 printf '%s' '{"category":"tooling","summary":"ctx merge","context":{"custom_key":"custom_val","cwd":"/overridden"}}' \
   | bash "$SCRIPTS/submit-friction.sh" --stdin --model m >/dev/null 2>&1
 req=$(last_req)
@@ -299,7 +376,20 @@ chk "context stdin merge (agent keys win)" "$(jq -r '
   if .body.context.custom_key=="custom_val" and .body.context.cwd=="/overridden"
   and (.body.context | has("occurred_at")) then 1 else 0 end' <<<"$req")"
 
-# 8e. harness detection matrix — markers verified from each harness's
+# 8j. context caps are enforced locally (the server rejects beyond them)
+before=$(log_len)
+python3 -c '
+import json,sys
+json.dump({"category":"tooling","summary":"too much context",
+           "context":{("k%d"%i):"v" for i in range(40)}}, sys.stdout)' \
+  | bash "$SCRIPTS/submit-friction.sh" --stdin --model m >"$WORK/ctxcap.out" 2>/dev/null
+rc=$?
+o=$(outcome "$(cat "$WORK/ctxcap.out")")
+chk "over-cap context -> rejected locally, no request" "$(jq -n --arg o "$o" \
+  --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
+  '($o|fromjson) as $j | if $j.status=="rejected" and ($j.message|test("context")) and $rc==1 and $b==$a then 1 else 0 end')"
+
+# 8k. harness detection matrix — markers verified from each harness's
 #     installed code; nested launches attribute to the INNER harness; profile
 #     API-key leaks must not false-positive.
 detect_case() { # <desc> <expected_harness> [ENV=val ...]
@@ -323,7 +413,7 @@ detect_case "profile API-key leaks -> unknown" unknown OPENCODE_API_KEY=k CODEX_
 detect_case "AGENT_FEEDBACK_HARNESS override wins" my-harness AGENT_FEEDBACK_HARNESS=my-harness CLAUDECODE=1
 detect_case "legacy PI_MODEL fallback -> pi" pi PI_MODEL=some/model
 
-# 8f. AGENT_FEEDBACK_MODEL env fallback when --model is not passed
+# 8l. AGENT_FEEDBACK_MODEL env fallback when --model is not passed
 set_mode created
 env AGENT_FEEDBACK_MODEL=model-from-env bash "$SCRIPTS/submit-friction.sh" \
   --category tooling --summary "model from env" >/dev/null 2>&1
@@ -331,12 +421,85 @@ req=$(last_req)
 chk "AGENT_FEEDBACK_MODEL fallback for coordinator_model" \
   "$(jq -r 'if .body.coordinator_model=="model-from-env" then 1 else 0 end' <<<"$req")"
 
+# ── submit-event.sh ──────────────────────────────────────────────────────────
+
+set_mode created
+# 20. happy path: 201 -> submitted, payload sent verbatim, key defaulted
+out=$(printf '%s' '{"service":"agent-feedback","ok":true,"n":3}' \
+  | bash "$SCRIPTS/submit-event.sh" --kind deploy --stdin --model m 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+req=$(last_req)
+chk "event 201 -> submitted, exit 0" "$(jq -n --arg o "$o" --argjson rc "$rc" \
+  '($o|fromjson) as $j | if $j.status=="submitted" and ($j.id|type)=="number" and $rc==0 then 1 else 0 end')"
+chk "event payload verbatim + defaulted key + POST /api/v1/events" "$(jq -r '
+  if .path=="/api/v1/events" and .body.kind=="deploy" and .body.payload.n==3
+  and .body.payload.ok==true and .body.machine_name=="testmach"
+  and (.body.key|test("^testmach-[0-9]{8}-[0-9]{6}-[0-9]+$")) then 1 else 0 end' <<<"$req")"
+
+# 21. identical replay under the same (kind,key) -> duplicate
+printf '%s' '{"a":1}' >"$WORK/event.json"
+bash "$SCRIPTS/submit-event.sh" --kind deploy --key dup-key --payload-file "$WORK/event.json" --model m >/dev/null 2>&1
+out=$(bash "$SCRIPTS/submit-event.sh" --kind deploy --key dup-key --payload-file "$WORK/event.json" --model m 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+chk "event identical replay -> duplicate, exit 0" "$(jq -n --arg o "$o" --argjson rc "$rc" \
+  '($o|fromjson) as $j | if $j.status=="duplicate" and $j.key=="dup-key" and $rc==0 then 1 else 0 end')"
+
+# 22. different content under the same key -> 409 mismatch, exit 1
+out=$(printf '%s' '{"a":2}' | bash "$SCRIPTS/submit-event.sh" --kind deploy --key dup-key --stdin --model m 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+chk "event changed content -> mismatch, exit 1" "$(jq -n --arg o "$o" --argjson rc "$rc" \
+  '($o|fromjson) as $j | if $j.status=="mismatch" and $j.key=="dup-key" and $rc==1 then 1 else 0 end')"
+
+# 23. kind "friction" is reserved, and a non-object payload is refused locally
+before=$(log_len)
+out=$(printf '%s' '{"a":1}' | bash "$SCRIPTS/submit-event.sh" --kind friction --stdin --model m 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+reserved_ok=$(jq -n --arg o "$o" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("reserved")) and $rc==1 then 1 else 0 end')
+out=$(printf '%s' '[1,2]' | bash "$SCRIPTS/submit-event.sh" --kind deploy --stdin --model m 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+nonobj_ok=$(jq -n --arg o "$o" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and $rc==1 then 1 else 0 end')
+chk "event kind friction and non-object payload rejected locally, no request" \
+  "$([ "$reserved_ok" = 1 ] && [ "$nonobj_ok" = 1 ] && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
+
+# 24. unreachable -> spooled as event-*, flushed to /api/v1/events next call
+export AGENT_FEEDBACK_URL="http://127.0.0.1:1"
+out=$(printf '%s' '{"spooled":true}' | bash "$SCRIPTS/submit-event.sh" --kind deploy --key spooled-key --stdin --model m 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+n_spool=$(find "$SPOOL" -name 'event-*.json' 2>/dev/null | wc -l | tr -d ' ')
+spool_ok=$(jq -n --arg o "$o" --argjson rc "$rc" --argjson n "$n_spool" '($o|fromjson) as $j |
+  if $j.status=="spooled" and $rc==0 and $n==1 then 1 else 0 end')
+export AGENT_FEEDBACK_URL="$saved_url"
+before=$(log_len)
+bash "$SCRIPTS/query.sh" --family event --flush >/dev/null 2>&1
+n_spool=$(find "$SPOOL" \( -name 'event-*.json' -o -name 'event-*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
+flushed=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.path=="/api/v1/events" and .body.key=="spooled-key") | 1' | head -n1)
+chk "event spooled offline and flushed to /api/v1/events" \
+  "$([ "$spool_ok" = 1 ] && [ "$n_spool" = 0 ] && [ "${flushed:-0}" = 1 ] && echo 1 || echo 0)"
+
+# 25. --dry-run builds and validates without sending
+before=$(log_len)
+out=$(printf '%s' '{"a":1}' | bash "$SCRIPTS/submit-event.sh" --kind bench --key k --stdin --model m --dry-run 2>/dev/null)
+rc=$?
+chk "event --dry-run -> valid, no request" "$(jq -n --arg last "$(outcome "$out")" \
+  --arg payload "$(sed '$d' <<<"$out")" --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
+  '($last|fromjson) as $j | ($payload|fromjson) as $p |
+   if $j.status=="valid" and $p.kind=="bench" and $p.payload.a==1 and $rc==0 and $b==$a then 1 else 0 end')"
+
 # ── submit-review.sh ─────────────────────────────────────────────────────────
 
 # fixture run dir
 RUN_BASE="$HOME/.cache/multi-llm-review"
 RUN_DIR="$RUN_BASE/20260730-101010-4242"
 mkdir -p "$RUN_DIR"
+export AGENT_FEEDBACK_REVIEW_DIRS="$RUN_BASE"
 cat >"$RUN_DIR/meta.json" <<'JSON'
 {"machine":"testmach","skill":"multi-llm-review","run_ts":"20260730-101010",
  "caller":"claude-fable-5",
@@ -364,8 +527,42 @@ chk "review payload: run_id, label-joined score, empty duration omitted" "$(jq -
   and (.body.reviewers[0] | has("output") | not)
   then 1 else 0 end' <<<"$req")"
 
-# 10. 409 mismatch -> mismatch outcome, exit 1, no .submitted
+# 9a. --include-outputs sends reviewer output and prompt, however large.
 rm -f "$RUN_DIR/.submitted"
+python3 -c 'import sys; sys.stdout.write("O"*200000)' >"$RUN_DIR/gpt56.md"
+python3 -c 'import sys; sys.stdout.write("P"*200000)' >"$RUN_DIR/prompt.md"
+bash "$SCRIPTS/submit-review.sh" "$RUN_DIR" --include-outputs >/dev/null 2>&1
+req=$(last_req)
+chk "review --include-outputs carries 200 KB output and prompt" "$(jq -r '
+  if (.body.reviewers[0].output|length)==200000 and (.body.prompt|length)==200000
+  and (.body.reviewers[1] | has("output") | not) then 1 else 0 end' <<<"$req")"
+rm -f "$RUN_DIR/gpt56.md" "$RUN_DIR/prompt.md" "$RUN_DIR/.submitted"
+
+# 9b. A 201 whose receipt cannot be trusted must NOT write .submitted; the run
+# is spooled instead (reviews are idempotent, so a retry is safe).
+set_mode review_bad_created
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_DIR" 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+marked=$([ -e "$RUN_DIR/.submitted" ] && echo 1 || echo 0)
+n_spool=$(find "$SPOOL" -name 'review-*.json' 2>/dev/null | wc -l | tr -d ' ')
+chk "malformed review 201 -> no .submitted, spooled for retry" "$(jq -n --arg o "$o" \
+  --argjson rc "$rc" --argjson marked "$marked" --argjson n "$n_spool" \
+  '($o|fromjson) as $j |
+   if $j.status=="spooled" and $j.reason=="malformed_success_response" and $rc==0
+      and $marked==0 and $n==1 then 1 else 0 end')"
+# The same validation guards the flush path: a malformed success keeps the file.
+bash "$SCRIPTS/query.sh" --family review --flush >/dev/null 2>&1
+n_spool=$(find "$SPOOL" \( -name 'review-*.json' -o -name 'review-*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
+retained=$([ "$n_spool" = 1 ] && echo 1 || echo 0)
+set_mode created
+bash "$SCRIPTS/query.sh" --family review --flush >/dev/null 2>&1
+n_spool=$(find "$SPOOL" \( -name 'review-*.json' -o -name 'review-*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
+chk "flush retains a malformed review receipt, clears it on a valid one" \
+  "$([ "$retained" = 1 ] && [ "$n_spool" = 0 ] && echo 1 || echo 0)"
+rm -f "$RUN_DIR/.submitted"
+
+# 10. 409 mismatch -> mismatch outcome, exit 1, no .submitted
 set_mode mismatch409
 out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_DIR" 2>/dev/null)
 rc=$?
@@ -389,6 +586,7 @@ rc=$?
 o=$(outcome "$out")
 chk "review replay 200 -> duplicate, exit 0" "$(jq -n --arg o "$o" --argjson rc "$rc" \
   '($o|fromjson) as $j | if $j.status=="duplicate" and $j.id==102 and $rc==0 then 1 else 0 end')"
+
 # 12a. Blank optional counts do not discard a completed score, and a delayed
 # retry attributes the payload to the run's original caller.
 RUN_OPTIONAL="$RUN_BASE/20260730-202020-optional"
@@ -457,17 +655,43 @@ rc=$?
 chk "ambiguous timestamp refuses score borrowing without request or marker" \
   "$([ "$rc" -ne 0 ] && [ "$(log_len)" -eq "$before" ] && [ ! -e "$RUN_AMBIG_A/.submitted" ] && echo 1 || echo 0)"
 
-# 12e. Sweep recovers locks without metadata or with corrupt metadata by
+# 12e. Sweep picks up an unsubmitted run from AGENT_FEEDBACK_REVIEW_DIRS.
+RUN_SWEEP="$RUN_BASE/20200101-000003-sweepable"
+mkdir -p "$RUN_SWEEP"
+cat >"$RUN_SWEEP/meta.json" <<'JSON'
+{"machine":"testmach","skill":"multi-llm-review","run_ts":"20200101-000003",
+ "caller":"caller","slots":{"one":{"label":"Sweepable"}}}
+JSON
+printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$RUN_SWEEP/summary.tsv"
+printf '20200101-000003\tx\tSweepable\t5\t1\t0\tok\n' >>"$RUN_BASE/scorecards.tsv"
+set_mode created
+out=$(bash "$SCRIPTS/submit-review.sh" --sweep 2>/dev/null)
+swept=$(jq -r 'select(.body.run_id=="testmach-20200101-000003-sweepable") | 1' "$STATE/requests.jsonl" | head -n1)
+chk "sweep submits a run found via AGENT_FEEDBACK_REVIEW_DIRS" \
+  "$([ "${swept:-0}" = 1 ] && [ -f "$RUN_SWEEP/.submitted" ] && echo 1 || echo 0)"
+
+# 12f. With no run dirs configured, sweep warns and only flushes the spool.
+before=$(log_len)
+out=$(env -u AGENT_FEEDBACK_REVIEW_DIRS -u REVIEW_LOG_DIR bash "$SCRIPTS/submit-review.sh" --sweep 2>&1)
+case "$out" in
+  *"no review run directories configured (set AGENT_FEEDBACK_REVIEW_DIRS)"*) warned=1 ;;
+  *) warned=0 ;;
+esac
+chk "sweep without configured dirs warns and sends nothing" \
+  "$([ "$warned" = 1 ] && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
+
+# 12g. Sweep recovers locks without metadata or with corrupt metadata by
 # directory mtime, while a live owner remains protected even past the threshold.
 LOCK="$HOME/.cache/agent-feedback/sweep.lock"
 mkdir -p "$(dirname "$LOCK")"
+rm -rf "$LOCK"
 mkdir "$LOCK"
-touch -d '2 minutes ago' "$LOCK"
+set_mtime "$LOCK" 120
 SWEEP_LOCK_STALE_SECS=1 SWEEP_MIN_AGE_HOURS=100000 bash "$SCRIPTS/submit-review.sh" --sweep >/dev/null 2>&1
 missing_lock_recovered=$([ ! -e "$LOCK" ] && echo 1 || echo 0)
 mkdir "$LOCK"
 printf 'corrupt\n' >"$LOCK/born"
-touch -d '2 minutes ago' "$LOCK"
+set_mtime "$LOCK" 120
 SWEEP_LOCK_STALE_SECS=1 SWEEP_MIN_AGE_HOURS=100000 bash "$SCRIPTS/submit-review.sh" --sweep >/dev/null 2>&1
 corrupt_lock_recovered=$([ ! -e "$LOCK" ] && echo 1 || echo 0)
 mkdir "$LOCK"
@@ -488,8 +712,14 @@ bash "$SCRIPTS/query.sh" --type friction --since "2026-07-01T00:00:00+02:00" >/d
 req=$(last_req)
 chk "query URL-encodes since (+02:00)" "$(jq -r 'if (.path|test("since=2026-07-01T00%3A00%3A00%2B02%3A00"; "i")) then 1 else 0 end' <<<"$req")"
 
+# 13a. new 1.1 list parameters reach the server
+bash "$SCRIPTS/query.sh" --family friction --before-id 40 --include-payload --limit 5 >/dev/null 2>&1
+req=$(last_req)
+chk "query passes family, before_id and include=payload" "$(jq -r '
+  if (.path|test("family=friction")) and (.path|test("before_id=40"))
+  and (.path|test("include=payload")) and (.path|test("limit=5")) then 1 else 0 end' <<<"$req")"
+
 # 14. read-only: a spooled payload is NOT flushed by query
-saved_url="$AGENT_FEEDBACK_URL"
 export AGENT_FEEDBACK_URL="http://127.0.0.1:1"
 bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "stay spooled" --model m >/dev/null 2>&1
 export AGENT_FEEDBACK_URL="$saved_url"
@@ -506,30 +736,112 @@ chk "query --flush flushes the spool" "$([ "$n_spool" = 0 ] && echo 1 || echo 0)
 
 # 16. get by id returns full record
 out=$(bash "$SCRIPTS/query.sh" 43 2>/dev/null)
-chk "query by id -> full payload" "$(jq -r 'if .id==43 and .payload.category=="tooling" then 1 else 0 end' <<<"$out")"
+chk "query by id -> full payload" "$(jq -r 'if .id==43 and .payload.category=="tooling" and .family=="friction" then 1 else 0 end' <<<"$out")"
+
+# 16a. export: stream verified against its terminator (count + sha256)
+set_list_rows 7
+out=$(bash "$SCRIPTS/query.sh" export 2>"$WORK/export.err")
+rc=$?
+lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+header_ok=$(printf '%s\n' "$out" | head -n1 | jq -r 'if .export_format==1 then 1 else 0 end')
+term_ok=$(printf '%s\n' "$out" | tail -n1 | jq -r 'if .export_complete==true and .count==7 and (.sha256|length)==64 then 1 else 0 end')
+chk "export streams header+records+terminator and verifies it, exit 0" \
+  "$([ "$rc" = 0 ] && [ "$lines" = 9 ] && [ "$header_ok" = 1 ] && [ "$term_ok" = 1 ] && echo 1 || echo 0)"
+
+# 16b. export without a terminator is reported as damaged, exit 1, output kept
+set_mode export_no_terminator
+out=$(bash "$SCRIPTS/query.sh" export 2>"$WORK/export2.err")
+rc=$?
+lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+case "$(cat "$WORK/export2.err")" in *"missing its"*|*"truncated"*) warned=1 ;; *) warned=0 ;; esac
+chk "export without terminator -> warning, exit 1, partial output still printed" \
+  "$([ "$rc" = 1 ] && [ "$warned" = 1 ] && [ "$lines" = 8 ] && echo 1 || echo 0)"
+set_mode created
+
+# 16c. export honours its filters
+out=$(bash "$SCRIPTS/query.sh" export --family friction --since "2026-01-01T00:00:00Z" 2>/dev/null)
+req=$(last_req)
+chk "export passes family and since" "$(jq -r '
+  if (.path|startswith("/api/v1/export")) and (.path|test("family=friction"))
+  and (.path|test("since=2026-01-01")) then 1 else 0 end' <<<"$req")"
 
 # ── process.sh ───────────────────────────────────────────────────────────────
 
-# 17. list: unprocessed filter + compact TSV
-out=$(bash "$SCRIPTS/process.sh" list 2>/dev/null)
+# 17. list: unprocessed filter + compact TSV with family
+set_list_rows 1
+out=$(bash "$SCRIPTS/process.sh" list 2>"$WORK/list.err")
 req=$(last_req)
-chk "process list -> processed=false, TSV row" "$(jq -n --arg o "$out" --arg path "$(jq -r .path <<<"$req")" \
-  'if ($path|contains("processed=false")) and ($o|contains("43\tfriction\ttestmach\ttooling\tfixture summary")) then 1 else 0 end')"
+case "$(cat "$WORK/list.err")" in *"total: 1"*) total_shown=1 ;; *) total_shown=0 ;; esac
+chk "process list -> processed=false, TSV row with family, total on stderr" "$(jq -n --arg o "$out" \
+  --arg path "$(jq -r .path <<<"$req")" --argjson t "$total_shown" \
+  'if ($path|contains("processed=false")) and ($t==1)
+      and ($o|contains("1\tfriction\tfriction\ttestmach\ttooling\tfixture summary 1")) then 1 else 0 end')"
 
-# 18. done: batch mark, outcome echoed
-out=$(bash "$SCRIPTS/process.sh" done 43 44 2>/dev/null)
+# 17a. list follows next_before_id across every page (500 rows per page)
+set_list_rows 1200
+before=$(log_len)
+out=$(bash "$SCRIPTS/process.sh" list --json 2>"$WORK/list2.err")
+gets=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.method=="GET") | 1' | wc -l | tr -d ' ')
+cursors=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.path|test("before_id=")) | 1' | wc -l | tr -d ' ')
+case "$(cat "$WORK/list2.err")" in *"total: 1200"*) total_shown=1 ;; *) total_shown=0 ;; esac
+chk "process list pages through 1200 rows in 3 requests, merged --json, total" "$(jq -n \
+  --arg o "$out" --argjson gets "$gets" --argjson cursors "$cursors" --argjson t "$total_shown" \
+  '($o|fromjson) as $j |
+   if ($j.submissions|length)==1200 and $j.total==1200 and $j.submissions[0].id==1200
+      and $j.submissions[1199].id==1 and $gets==3 and $cursors==2 and $t==1 then 1 else 0 end')"
+
+# 17b. --limit caps the total rows returned across pages
+before=$(log_len)
+out=$(bash "$SCRIPTS/process.sh" list --limit 600 --json 2>/dev/null)
+gets=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.method=="GET") | 1' | wc -l | tr -d ' ')
+chk "process list --limit caps the whole result, not one page" "$(jq -n --arg o "$out" --argjson gets "$gets" \
+  '($o|fromjson) as $j | if ($j.submissions|length)==600 and $gets==2 then 1 else 0 end')"
+
+# 17c. --include-processed drops the processed filter; --all is a hard error
+out=$(bash "$SCRIPTS/process.sh" list --include-processed --limit 1 2>/dev/null)
+req=$(last_req)
+inc_ok=$(jq -r 'if (.path|contains("processed=false")) then 0 else 1 end' <<<"$req")
+before=$(log_len)
+err=$(bash "$SCRIPTS/process.sh" list --all 2>&1 >/dev/null)
+rc=$?
+case "$err" in *"--include-processed"*) all_msg=1 ;; *) all_msg=0 ;; esac
+chk "list --include-processed drops the filter; --all errors pointing at it" \
+  "$([ "$inc_ok" = 1 ] && [ "$rc" -ne 0 ] && [ "$all_msg" = 1 ] && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
+set_list_rows 1
+
+# 17d. family/type/machine filters reach the server
+bash "$SCRIPTS/process.sh" list --family review --type multi-llm-review --machine other >/dev/null 2>&1
+req=$(last_req)
+chk "process list passes family/type/machine" "$(jq -r '
+  if (.path|test("family=review")) and (.path|test("type=multi-llm-review"))
+  and (.path|test("machine=other")) then 1 else 0 end' <<<"$req")"
+
+# 18. done: batch mark with a resolution, outcome echoed verbatim
+out=$(bash "$SCRIPTS/process.sh" done 43 44 --resolution "fixed in example@1a2b3c4" 2>/dev/null)
 rc=$?
 o=$(outcome "$out")
 req=$(last_req)
-chk "process done -> ids marked" "$(jq -n --arg o "$o" --argjson rc "$rc" \
+chk "process done --resolution -> ids marked, resolution sent and echoed" "$(jq -n --arg o "$o" --argjson rc "$rc" \
   --arg body "$(jq -c .body <<<"$req")" \
   '($o|fromjson) as $j | ($body|fromjson) as $b |
-   if $j.processed==true and $j.updated==[43,44] and $b.ids==[43,44] and $b.processed==true and $rc==0 then 1 else 0 end')"
+   if $j.processed==true and $j.updated==[43,44] and $j.resolution=="fixed in example@1a2b3c4"
+      and $b.ids==[43,44] and $b.processed==true and $b.resolution=="fixed in example@1a2b3c4"
+      and $rc==0 then 1 else 0 end')"
 
-# 19. undo -> processed:false
+# 18a. a blank resolution is rejected locally (the server would 400)
+before=$(log_len)
+out=$(bash "$SCRIPTS/process.sh" done 43 --resolution "   " 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+chk "blank --resolution -> rejected locally, no request" "$(jq -n --arg o "$o" \
+  --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
+  '($o|fromjson) as $j | if $j.status=="rejected" and $rc==1 and $b==$a then 1 else 0 end')"
+
+# 19. undo -> processed:false, no resolution field
 out=$(bash "$SCRIPTS/process.sh" undo 44 2>/dev/null)
 req=$(last_req)
-chk "process undo -> processed:false" "$(jq -r 'if .body.processed==false and .body.ids==[44] then 1 else 0 end' <<<"$req")"
+chk "process undo -> processed:false without resolution" "$(jq -r '
+  if .body.processed==false and .body.ids==[44] and (.body|has("resolution")|not) then 1 else 0 end' <<<"$req")"
 
 # 20. non-numeric id dies
 bash "$SCRIPTS/process.sh" done abc >/dev/null 2>&1
