@@ -373,6 +373,20 @@ func parseImportRecord(line []byte, lineNo int, trustHashes bool) (store.Submiss
 	if rec.ID <= 0 {
 		return store.Submission{}, fmt.Errorf("line %d: id must be a positive integer", lineNo)
 	}
+	// Identifiers are trimmed exactly as the create path trims them, BEFORE
+	// validation, storage and hash recomputation: an imported row padded with
+	// whitespace would otherwise never match the (family, submission_type,
+	// run_id) key a later submission builds, and its recomputed hash would
+	// differ from that submission's. A 1.x export's declared hashes were
+	// already computed over trimmed values (1.x trimmed on create), so
+	// recomputing from the trimmed values here agrees with them.
+	rec.SubmissionType = strings.TrimSpace(rec.SubmissionType)
+	rec.MachineName = strings.TrimSpace(rec.MachineName)
+	rec.CoordinatorModel = strings.TrimSpace(rec.CoordinatorModel)
+	if rec.RunID != nil {
+		trimmed := strings.TrimSpace(*rec.RunID)
+		rec.RunID = &trimmed
+	}
 	switch rec.Family {
 	case store.FamilyFriction, store.FamilyReview, store.FamilyEvent:
 	default:

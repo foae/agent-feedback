@@ -45,13 +45,16 @@ af_require_deps
 WORKDIR=$(mktemp -d) || af_die "could not create a temporary directory"
 trap 'rm -rf "$WORKDIR"; rm -f "${AF_RESP:-}"' EXIT
 
+# A flag whose value is missing is a usage error, not an empty value: `shift 2`
+# with one argument left fails, and under `set -e` the script would die without
+# its outcome line.
 while [ $# -gt 0 ]; do
   case "$1" in
-    --kind)         KIND="${2:-}"; shift 2 ;;
-    --key)          KEY="${2:-}"; shift 2 ;;
-    --model)        MODEL="${2:-}"; shift 2 ;;
-    --machine)      MACHINE="${2:-}"; shift 2 ;;
-    --payload-file) PAYLOAD_SRC="${2:-}"; shift 2 ;;
+    --kind)         [ $# -ge 2 ] || af_reject "$1 requires a value"; KIND="$2"; shift 2 ;;
+    --key)          [ $# -ge 2 ] || af_reject "$1 requires a value"; KEY="$2"; shift 2 ;;
+    --model)        [ $# -ge 2 ] || af_reject "$1 requires a value"; MODEL="$2"; shift 2 ;;
+    --machine)      [ $# -ge 2 ] || af_reject "$1 requires a value"; MACHINE="$2"; shift 2 ;;
+    --payload-file) [ $# -ge 2 ] || af_reject "$1 requires a value"; PAYLOAD_SRC="$2"; shift 2 ;;
     --stdin)        STDIN_MODE=1; shift ;;
     --dry-run)      DRY_RUN=1; shift ;;
     *) af_reject "unknown flag: $1 (see header for usage)" ;;
@@ -152,7 +155,10 @@ case "$AF_HTTP_CODE" in
       '{status:"mismatch",key:$key,message:$msg}')"
     exit 1
     ;;
-  4*)
+  1*|3*|4*)
+    # 1xx/3xx: the endpoint is not the service (a redirect means the URL is
+    # misconfigured). Retrying that for 30 days is wrong — reject it now, with
+    # the status, so the configuration gets fixed.
     af_outcome "$(jq -cn --arg key "$KEY" --argjson code "$AF_HTTP_CODE" --arg msg "$(jq -r '.message // ""' "$AF_RESP" 2>/dev/null | head -c 400)" \
       '{status:"rejected",key:$key,http_status:$code,message:$msg}')"
     exit 1

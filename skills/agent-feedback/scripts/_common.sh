@@ -171,56 +171,78 @@ af_auth_header_file() {
 # A 2xx alone never proves the server stored OUR submission. Every success path
 # checks the returned record against the payload that was sent.
 
+# Every validator slurps (`jq -s`) and demands `length == 1`: jq parses a
+# concatenated stream of documents happily, and a body holding several of them
+# is not a receipt — the second document could describe a different record than
+# the one that was checked. One document, or the receipt is malformed.
+
 # af_friction_response_valid <response-file> <payload-file> — family AND
 # submission_type must both say "friction", the id must be a positive integer,
 # and the record must carry the machine name that was sent.
 af_friction_response_valid() {
-  jq -e --slurpfile p "$2" '(.id? | select(type == "number")) as $id
-         | ($id > 0 and $id == ($id | floor))
-           and (.family == "friction")
-           and (.submission_type == "friction")
-           and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
+  jq -e -s --slurpfile p "$2" 'length == 1
+     and (.[0] | type == "object"
+          and ((.id | type) == "number") and (.id > 0) and (.id == (.id | floor))
+          and (.family == "friction")
+          and (.submission_type == "friction")
+          and (.machine_name == $p[0].machine_name))' "$1" >/dev/null 2>&1
 }
 
-# af_review_identity_ok <response-file> <payload-file> — same run_id + machine.
+# af_review_identity_ok <response-file> <payload-file> — same run_id, machine
+# and coordinator model. All three are identity: a record filed under another
+# model is another record.
 af_review_identity_ok() {
-  jq -e --slurpfile p "$2" \
-    '(.run_id == $p[0].run_id) and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
+  jq -e -s --slurpfile p "$2" 'length == 1
+     and (.[0] | (.run_id == $p[0].run_id)
+          and (.machine_name == $p[0].machine_name)
+          and (.coordinator_model == $p[0].coordinator_model))' "$1" >/dev/null 2>&1
 }
 
-# af_identity_comparable <response-file> — the body parses, is an object, has an
-# id and carries both identity fields. Only then can a difference be called a
-# collision; anything else is a malformed success (retryable), never a claim
-# that the server stored someone else's record.
+# af_identity_comparable <response-file> — the body is exactly one JSON object
+# carrying a POSITIVE INTEGER id and STRING identity fields. Only then can a
+# difference be called a collision; anything else (a string id, a missing or
+# non-string identity field, several documents) is a malformed success —
+# retryable — never a claim that the server stored someone else's record.
 af_identity_comparable() {
-  jq -e 'type == "object" and (.id != null)
-         and (.run_id != null) and (.machine_name != null)' "$1" >/dev/null 2>&1
+  jq -e -s 'length == 1
+     and (.[0] | type == "object"
+          and ((.id | type) == "number") and (.id > 0) and (.id == (.id | floor))
+          and ((.run_id | type) == "string")
+          and ((.machine_name | type) == "string")
+          and ((.coordinator_model | type) == "string"))' "$1" >/dev/null 2>&1
 }
 
 # af_review_response_valid <response-file> <payload-file>
 af_review_response_valid() {
-  jq -e --slurpfile p "$2" '(.id? | select(type == "number")) as $id
-         | ($id > 0 and $id == ($id | floor))
-           and (.family == "review")
-           and (.submission_type == $p[0].skill)
-           and (.run_id == $p[0].run_id)
-           and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
+  jq -e -s --slurpfile p "$2" 'length == 1
+     and (.[0] | type == "object"
+          and ((.id | type) == "number") and (.id > 0) and (.id == (.id | floor))
+          and (.family == "review")
+          and (.submission_type == $p[0].skill)
+          and (.run_id == $p[0].run_id)
+          and (.machine_name == $p[0].machine_name)
+          and (.coordinator_model == $p[0].coordinator_model))' "$1" >/dev/null 2>&1
 }
 
-# af_event_identity_ok <response-file> <payload-file> — same key + machine.
+# af_event_identity_ok <response-file> <payload-file> — same key, machine and
+# coordinator model.
 af_event_identity_ok() {
-  jq -e --slurpfile p "$2" \
-    '(.run_id == $p[0].key) and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
+  jq -e -s --slurpfile p "$2" 'length == 1
+     and (.[0] | (.run_id == $p[0].key)
+          and (.machine_name == $p[0].machine_name)
+          and (.coordinator_model == $p[0].coordinator_model))' "$1" >/dev/null 2>&1
 }
 
 # af_event_response_valid <response-file> <payload-file>
 af_event_response_valid() {
-  jq -e --slurpfile p "$2" '(.id? | select(type == "number")) as $id
-         | ($id > 0 and $id == ($id | floor))
-           and (.family == "event")
-           and (.submission_type == $p[0].kind)
-           and (.run_id == $p[0].key)
-           and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
+  jq -e -s --slurpfile p "$2" 'length == 1
+     and (.[0] | type == "object"
+          and ((.id | type) == "number") and (.id > 0) and (.id == (.id | floor))
+          and (.family == "event")
+          and (.submission_type == $p[0].kind)
+          and (.run_id == $p[0].key)
+          and (.machine_name == $p[0].machine_name)
+          and (.coordinator_model == $p[0].coordinator_model))' "$1" >/dev/null 2>&1
 }
 
 # af_request <METHOD> <path> [payload-file]
@@ -284,19 +306,21 @@ af_spool() {
   local prefix="$1" payload="$2" name tmp
   prefix=$(printf '%s' "$prefix" | tr -c 'A-Za-z0-9._-' '_')
   # Spooled payloads are private to this user: prose, repo paths and reviewer
-  # output sit here until they are flushed. The mode is set when the directory
-  # is created; an existing directory's mode is the operator's business (and
-  # silently widening it would mask an unwritable spool).
+  # output sit here until they are flushed. The directory is narrowed to 700 on
+  # every spool, not only when it is created — a spool left world-readable by an
+  # older client (or an umask accident) would leak every payload it holds.
+  # Narrowing can only fail when the directory is not ours, which the write
+  # attempts below surface anyway, so a chmod failure is a warning, never fatal.
   if [ ! -d "$AF_SPOOL" ]; then
     mkdir -p "$AF_SPOOL" 2>/dev/null || af_spool_unwritable "$payload"
-    chmod 700 "$AF_SPOOL" 2>/dev/null || true
   fi
+  chmod 700 "$AF_SPOOL" 2>/dev/null || af_warn "could not restrict $AF_SPOOL to mode 700"
   name="$prefix-$(date +%Y%m%d-%H%M%S)-$$-$RANDOM.json"
   tmp="$AF_SPOOL/.tmp.$name"
   cp "$payload" "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; af_spool_unwritable "$payload"; }
-  chmod 600 "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; af_spool_unwritable "$payload"; }
+  chmod 600 "$tmp" 2>/dev/null || af_warn "could not restrict $tmp to mode 600"
   mv "$tmp" "$AF_SPOOL/$name" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; af_spool_unwritable "$payload"; }
-  chmod 600 "$AF_SPOOL/$name" 2>/dev/null || true
+  chmod 600 "$AF_SPOOL/$name" 2>/dev/null || af_warn "could not restrict $AF_SPOOL/$name to mode 600"
   [ -s "$AF_SPOOL/$name" ] || af_spool_unwritable "$payload"
   af_warn "payload spooled to $AF_SPOOL/$name (will retry on the next submit/flush call)"
   return 0
@@ -439,6 +463,13 @@ af_flush_spool() {
 # exactly like an empty queue.
 af_pagination_next() {
   local resp="$1" cur="$2" rows="$3" has_more next
+  # The paging contract first: has_more a boolean, submissions an array, total a
+  # number. A body that omits them ({} with a 200, say) is a malformed response,
+  # not the end of the queue — reporting it as "no more pages" would look
+  # exactly like an empty queue.
+  jq -e '(.has_more | type) == "boolean"
+         and (.submissions | type) == "array"
+         and (.total | type) == "number"' "$resp" >/dev/null 2>&1 || return 1
   has_more=$(jq -r 'if .has_more then "1" else "0" end' "$resp" 2>/dev/null) || return 1
   [ "$has_more" = 1 ] || { printf ''; return 0; }
   next=$(jq -r '.next_before_id // empty' "$resp" 2>/dev/null) || return 1

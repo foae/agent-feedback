@@ -59,15 +59,18 @@ CTX_F="$WORKDIR/extra-context"; printf '{}' >"$CTX_F"
 # Large prose (details / suggested_fix) never travels through jq's argv:
 # --arg is capped by the OS argument limit (128 KiB per argument on Linux), so
 # every free-text field is staged in a file and read with --rawfile.
+# A flag whose value is missing is a usage error, not an empty value: `shift 2`
+# with one argument left fails, and under `set -e` the script would die without
+# its outcome line.
 while [ $# -gt 0 ]; do
   case "$1" in
-    --category)      CATEGORY="${2:-}"; shift 2 ;;
-    --summary)       SUMMARY="${2:-}"; shift 2 ;;
-    --details)       printf '%s' "${2:-}" >"$DETAILS_F"; shift 2 ;;
-    --suggested-fix) printf '%s' "${2:-}" >"$FIX_F"; shift 2 ;;
-    --project)       PROJECT="${2:-}"; shift 2 ;;
-    --harness)       HARNESS="${2:-}"; shift 2 ;;
-    --model)         MODEL="${2:-}"; shift 2 ;;
+    --category)      [ $# -ge 2 ] || af_reject "$1 requires a value"; CATEGORY="$2"; shift 2 ;;
+    --summary)       [ $# -ge 2 ] || af_reject "$1 requires a value"; SUMMARY="$2"; shift 2 ;;
+    --details)       [ $# -ge 2 ] || af_reject "$1 requires a value"; printf '%s' "$2" >"$DETAILS_F"; shift 2 ;;
+    --suggested-fix) [ $# -ge 2 ] || af_reject "$1 requires a value"; printf '%s' "$2" >"$FIX_F"; shift 2 ;;
+    --project)       [ $# -ge 2 ] || af_reject "$1 requires a value"; PROJECT="$2"; shift 2 ;;
+    --harness)       [ $# -ge 2 ] || af_reject "$1 requires a value"; HARNESS="$2"; shift 2 ;;
+    --model)         [ $# -ge 2 ] || af_reject "$1 requires a value"; MODEL="$2"; shift 2 ;;
     --stdin)         STDIN_MODE=1; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
     *) af_reject "unknown flag: $1 (see header for usage)" ;;
@@ -197,7 +200,10 @@ case "$AF_HTTP_CODE" in
     af_spool "friction" "$PAYLOAD"
     af_outcome "$(jq -cn --arg r "$(af_transport_reason)" '{status:"spooled",reason:$r}')"
     ;;
-  4*)
+  1*|3*|4*)
+    # 1xx/3xx: the endpoint is not the service (a redirect means the URL is
+    # misconfigured). Retrying that for 30 days is wrong — reject it now, with
+    # the status, so the configuration gets fixed.
     af_outcome "$(jq -cn --argjson code "$AF_HTTP_CODE" --arg msg "$(jq -r '.message // ""' "$AF_RESP" 2>/dev/null | head -c 400)" \
       '{status:"rejected",http_status:$code,message:$msg}')"
     exit 1

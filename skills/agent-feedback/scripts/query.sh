@@ -59,12 +59,26 @@ export_cleanup() {
   rm -f "${AF_EXPORT_RAW:-}" "${AF_EXPORT_BODY:-}" "${AF_EXPORT_HEADER:-}" 2>/dev/null || true
 }
 
+# export_verify_failed <message> — a verification failure. STDOUT is the NDJSON
+# stream and must stay pure, so both the human line and the machine-readable
+# outcome go to stderr; the caller turns the non-zero return into exit 1.
+export_verify_failed() {
+  af_warn "$1"
+  jq -cn --arg m "$1" '{status:"error",message:$m}' >&2
+  return 1
+}
+
 export_cmd() {
   local -a PARAMS=()
+  local filtered=0
+  # `shift 2` with a single argument left fails; inside `export_cmd "$@" || …`
+  # `set -e` is disabled, so the loop would spin forever on the same flag.
   while [ $# -gt 0 ]; do
     case "$1" in
-      --family) PARAMS+=(--data-urlencode "family=${2:-}"); shift 2 ;;
-      --since)  PARAMS+=(--data-urlencode "since=${2:-}"); shift 2 ;;
+      --family) [ $# -ge 2 ] || af_reject "$1 requires a value"
+                PARAMS+=(--data-urlencode "family=$2"); filtered=1; shift 2 ;;
+      --since)  [ $# -ge 2 ] || af_reject "$1 requires a value"
+                PARAMS+=(--data-urlencode "since=$2"); filtered=1; shift 2 ;;
       *) af_reject "unknown flag for export: $1 (see header for usage)" ;;
     esac
   done
@@ -87,20 +101,35 @@ export_cmd() {
   if [ "$code" != 200 ]; then
     af_error "export failed: HTTP $code: $(head -c 300 "$AF_EXPORT_RAW" | tr -d '\n')"
   fi
+  # A 200 with a non-zero curl exit is a transfer that died mid-stream (the
+  # status line arrived, the body did not): the file on disk is a truncated
+  # export, never a backup.
+  if [ "$rc" != 0 ]; then
+    af_error "export failed: the transfer did not complete (curl exit $rc) despite HTTP 200"
+  fi
 
-  # Pure NDJSON on stdout; everything below reports to stderr only.
-  cat "$AF_EXPORT_RAW"
+  # Pure NDJSON on stdout; everything below reports to stderr only. A failed
+  # write (full disk, closed pipe) must not be followed by "export verified".
+  cat "$AF_EXPORT_RAW" || { export_verify_failed "export could not be written to stdout"; return 1; }
 
   local lines first last count records digest want_digest
   lines=$(wc -l <"$AF_EXPORT_RAW" | tr -d ' ')
   first=$(head -n1 "$AF_EXPORT_RAW")
   last=$(tail -n1 "$AF_EXPORT_RAW")
   if ! jq -e 'select(type == "object") | .export_format == 1' <<<"$first" >/dev/null 2>&1; then
-    af_warn "export does not start with an {\"export_format\":1,...} header — this is not an export stream; do NOT treat it as a backup"
+    export_verify_failed "export does not start with an {\"export_format\":1,...} header — this is not an export stream; do NOT treat it as a backup"
+    return 1
+  fi
+  # No --family/--since was asked for, so the header must report neither. A
+  # filtered header on an unfiltered request means the stream is a subset of
+  # the database — restoring from it would silently lose the rest.
+  if [ "$filtered" = 0 ] \
+     && ! jq -e '(.family == null) and (.since == null)' <<<"$first" >/dev/null 2>&1; then
+    export_verify_failed "export header reports a filtered export"
     return 1
   fi
   if ! jq -e 'select(type == "object") | .export_complete == true' <<<"$last" >/dev/null 2>&1; then
-    af_warn "export is missing its {\"export_complete\":true,...} terminator — the stream is truncated; do NOT treat it as a backup"
+    export_verify_failed "export is missing its {\"export_complete\":true,...} terminator — the stream is truncated; do NOT treat it as a backup"
     return 1
   fi
   count=$(jq -r '.count // empty' <<<"$last")
@@ -110,11 +139,11 @@ export_cmd() {
   records=$((lines - 2))
   [ "$records" -ge 0 ] || records=0
   if [ "$records" != "$count" ]; then
-    af_warn "export terminator claims ${count:-no} record(s) but $records were received — the stream is damaged; do NOT treat it as a backup"
+    export_verify_failed "export terminator claims ${count:-no} record(s) but $records were received — the stream is damaged; do NOT treat it as a backup"
     return 1
   fi
   if [ -z "$want_digest" ]; then
-    af_warn "export terminator carries no sha256 — the stream cannot be verified; do NOT treat it as a backup"
+    export_verify_failed "export terminator carries no sha256 — the stream cannot be verified; do NOT treat it as a backup"
     return 1
   fi
   AF_EXPORT_BODY=$(mktemp)
@@ -125,11 +154,11 @@ export_cmd() {
   fi
   digest=$(af_sha256 "$AF_EXPORT_BODY")
   if [ -z "$digest" ]; then
-    af_warn "no sha256sum/shasum available — the export digest CANNOT be verified; do NOT treat it as a backup"
+    export_verify_failed "no sha256sum/shasum available — the export digest CANNOT be verified; do NOT treat it as a backup"
     return 1
   fi
   if [ "$digest" != "$want_digest" ]; then
-    af_warn "export digest mismatch: terminator says $want_digest, received records hash to $digest — do NOT treat it as a backup"
+    export_verify_failed "export digest mismatch: terminator says $want_digest, received records hash to $digest — do NOT treat it as a backup"
     return 1
   fi
   af_warn "export verified: $count record(s)"
@@ -152,20 +181,23 @@ if [ $# -eq 1 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
 else
   PATH_Q="/api/v1/submissions"
   add() { PARAMS+=(--data-urlencode "$1=$2"); }
+  # A flag whose value is missing is a usage error: `shift 2` with one argument
+  # left fails, and a filter silently dropped would return the wrong rows.
   while [ $# -gt 0 ]; do
     case "$1" in
-      --family)    add family "${2:-}"; shift 2 ;;
-      --type)      add type "${2:-}"; shift 2 ;;
-      --machine)   add machine "${2:-}"; shift 2 ;;
-      --model)     add model "${2:-}"; shift 2 ;;
-      --since)     add since "${2:-}"; shift 2 ;;
-      --until)     add until "${2:-}"; shift 2 ;;
+      --family)    [ $# -ge 2 ] || af_reject "$1 requires a value"; add family "$2"; shift 2 ;;
+      --type)      [ $# -ge 2 ] || af_reject "$1 requires a value"; add type "$2"; shift 2 ;;
+      --machine)   [ $# -ge 2 ] || af_reject "$1 requires a value"; add machine "$2"; shift 2 ;;
+      --model)     [ $# -ge 2 ] || af_reject "$1 requires a value"; add model "$2"; shift 2 ;;
+      --since)     [ $# -ge 2 ] || af_reject "$1 requires a value"; add since "$2"; shift 2 ;;
+      --until)     [ $# -ge 2 ] || af_reject "$1 requires a value"; add until "$2"; shift 2 ;;
       --processed)
-        case "${2:-}" in true|false) ;; *) af_reject "--processed must be true or false" ;; esac
+        [ $# -ge 2 ] || af_reject "$1 requires a value"
+        case "$2" in true|false) ;; *) af_reject "--processed must be true or false" ;; esac
         add processed "$2"; shift 2 ;;
-      --limit)     add limit "${2:-}"; shift 2 ;;
-      --before-id) add before_id "${2:-}"; shift 2 ;;
-      --offset)    add offset "${2:-}"; shift 2 ;;
+      --limit)     [ $# -ge 2 ] || af_reject "$1 requires a value"; add limit "$2"; shift 2 ;;
+      --before-id) [ $# -ge 2 ] || af_reject "$1 requires a value"; add before_id "$2"; shift 2 ;;
+      --offset)    [ $# -ge 2 ] || af_reject "$1 requires a value"; add offset "$2"; shift 2 ;;
       --include-payload) add include payload; shift ;;
       --flush)     FLUSH=1; shift ;;
       *) af_reject "unknown flag: $1 (see header for usage)" ;;

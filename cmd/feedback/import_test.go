@@ -684,3 +684,76 @@ func TestImport_RollbackOnCorruptLineLateInStream(t *testing.T) {
 		t.Fatalf("a failed import must roll back completely, found %d row(s)", n)
 	}
 }
+
+// A 1.x export can carry whitespace-padded identifiers. They must be trimmed
+// before validation, storage and hash recomputation, exactly as the create path
+// trims them — otherwise the imported row sits under a key no later submission
+// can match, and replaying the same review would insert a second row.
+func TestImport_TrimsIdentifiers(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "feedback.db")
+	t.Setenv("DATABASE_PATH", dbPath)
+
+	records := []string{
+		`{"id":11,"family":"review","submission_type":"  review-panel  ",` +
+			`"machine_name":" workstation-a ","coordinator_model":" claude-fable-5-1 ",` +
+			`"run_id":"  run-9  ",` +
+			`"payload":{"prompt":"p","reviewers":[{"slot":"a","model":"m","status":"completed"}]},` +
+			`"created_at":"2026-07-30T10:00:00.000000Z"}`,
+	}
+	path := writeExportFile(t, dir, v1Header, records, true, "")
+	if err := runImport([]string{path}); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	ctx := context.Background()
+	db := openDB(t, dbPath)
+	svc := core.New(db)
+
+	row, err := svc.GetSubmission(ctx, 11)
+	if err != nil {
+		t.Fatalf("get 11: %v", err)
+	}
+	if row.SubmissionType != "review-panel" {
+		t.Fatalf("submission_type %q, want %q", row.SubmissionType, "review-panel")
+	}
+	if row.MachineName != "workstation-a" {
+		t.Fatalf("machine_name %q, want %q", row.MachineName, "workstation-a")
+	}
+	if row.CoordinatorModel != "claude-fable-5-1" {
+		t.Fatalf("coordinator_model %q, want %q", row.CoordinatorModel, "claude-fable-5-1")
+	}
+	if row.RunID == nil || *row.RunID != "run-9" {
+		t.Fatalf("run_id %v, want %q", row.RunID, "run-9")
+	}
+
+	// The hash is the one the trimmed values produce, so the imported row is
+	// the row a replay of the same review finds.
+	wantHash, err := core.HashForFamily(store.FamilyReview, "workstation-a", "claude-fable-5-1", row.Payload)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if row.PayloadHash != wantHash {
+		t.Fatalf("payload_hash %s, want %s", row.PayloadHash, wantHash)
+	}
+
+	// The same review submitted through the API replays onto the imported row
+	// instead of inserting a second one.
+	got, replayed, err := svc.CreateReview(ctx, core.CreateReviewInput{
+		Skill:            "review-panel",
+		MachineName:      "workstation-a",
+		CoordinatorModel: "claude-fable-5-1",
+		RunID:            "run-9",
+		Prompt:           "p",
+		Reviewers:        []core.ReviewerInput{{Slot: "a", Model: "m", Status: "completed"}},
+	})
+	if err != nil {
+		t.Fatalf("create review: %v", err)
+	}
+	if !replayed {
+		t.Fatal("an identical review must replay onto the imported row, not insert a new one")
+	}
+	if got.ID != 11 {
+		t.Fatalf("replay returned id %d, want the imported row 11", got.ID)
+	}
+}

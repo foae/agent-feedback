@@ -48,7 +48,9 @@ set_processed() { # <true|false> <id...> [--resolution TEXT]
   local -a ids=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --resolution) resolution="${2:-}"; have_resolution=1; shift 2 ;;
+      --resolution)
+        [ $# -ge 2 ] || af_reject "$1 requires a value"
+        resolution="$2"; have_resolution=1; shift 2 ;;
       -*) usage "unknown flag: $1" ;;
       *) ids+=("$1"); shift ;;
     esac
@@ -90,6 +92,18 @@ set_processed() { # <true|false> <id...> [--resolution TEXT]
                 and ((.not_found | type) == "array")' "$AF_RESP" >/dev/null 2>&1; then
       af_error "malformed response from /api/v1/submissions/processed: $(head -c 300 "$AF_RESP" | tr -d '\n')"
     fi
+    # The classification must answer THIS request: the mark it reports is the
+    # one that was asked for, every id it names was requested, and every
+    # requested id is classified exactly once. Anything else (a foreign id, a
+    # missing one, the opposite mark) means the outcome would describe a
+    # different operation than the one performed.
+    if ! jq -e --argjson want "$processed" --argjson ids "$ids_json" '
+           .processed == $want
+           and ([.updated[], .unchanged[], .not_found[]] as $all
+                | ($all | length) == ($all | unique | length)
+                and ($all | unique) == ($ids | unique))' "$AF_RESP" >/dev/null 2>&1; then
+      af_error "/api/v1/submissions/processed answered about different submissions than the ones requested: $(head -c 300 "$AF_RESP" | tr -d '\n')"
+    fi
     af_outcome "$(jq -c . "$AF_RESP")"
   elif [ "$AF_HTTP_CODE" = 000 ]; then
     af_error "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
@@ -103,11 +117,15 @@ list_cmd() {
   local -a FILTERS=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --family)  FILTERS+=(--data-urlencode "family=${2:-}"); shift 2 ;;
-      --type)    FILTERS+=(--data-urlencode "type=${2:-}"); shift 2 ;;
-      --machine) FILTERS+=(--data-urlencode "machine=${2:-}"); shift 2 ;;
+      --family)  [ $# -ge 2 ] || af_reject "$1 requires a value"
+                 FILTERS+=(--data-urlencode "family=$2"); shift 2 ;;
+      --type)    [ $# -ge 2 ] || af_reject "$1 requires a value"
+                 FILTERS+=(--data-urlencode "type=$2"); shift 2 ;;
+      --machine) [ $# -ge 2 ] || af_reject "$1 requires a value"
+                 FILTERS+=(--data-urlencode "machine=$2"); shift 2 ;;
       --limit)
-        limit="${2:-0}"
+        [ $# -ge 2 ] || af_reject "$1 requires a value"
+        limit="$2"
         [[ "$limit" =~ ^[0-9]+$ ]] || af_reject "--limit must be a non-negative integer"
         shift 2 ;;
       --include-processed) include_processed=1; shift ;;
