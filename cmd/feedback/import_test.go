@@ -24,7 +24,7 @@ var v1Records = []string{
 		`"coordinator_model":"claude-fable-5-1","run_id":null,` +
 		`"payload":{"category":"documentation","summary":"docs drifted","context":{"cwd":"/tmp"}},` +
 		`"payload_hash":null,"created_at":"2026-07-30T10:00:00.000000Z","processed_at":null,"resolution":null}`,
-	`{"id":2,"family":"review","submission_type":"multi-llm-review","machine_name":"workstation-a",` +
+	`{"id":2,"family":"review","submission_type":"review-panel","machine_name":"workstation-a",` +
 		`"coordinator_model":"claude-fable-5-1","run_id":"run-1",` +
 		`"payload":{"prompt":"review this","reviewers":[{"slot":"a","model":"m","status":"completed"}]},` +
 		`"payload_hash":"deadbeef","created_at":"2026-07-30T11:00:00.123456Z",` +
@@ -303,7 +303,7 @@ func TestImport_RoundTripFromExport(t *testing.T) {
 		t.Fatalf("create friction: %v", err)
 	}
 	if _, _, err := source.CreateReview(ctx, core.CreateReviewInput{
-		Skill: "multi-llm-review", MachineName: "workstation-a", CoordinatorModel: "claude-fable-5",
+		Skill: "review-panel", MachineName: "workstation-a", CoordinatorModel: "claude-fable-5",
 		RunID: "run-1", Prompt: "review this",
 		Reviewers: []core.ReviewerInput{{Slot: "a", Model: "m", Status: "completed"}},
 	}); err != nil {

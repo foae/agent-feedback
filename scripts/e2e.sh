@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end test of agent-feedback. Run against a compose deployment; creates
-# test submissions in Postgres — clean up via `docker compose down -v` or by
-# deleting the rows afterward. Safe to rerun against a persistent database:
-# every run uses unique run_ids and unique friction content.
+# test submissions in the service's database — clean up via `docker compose
+# down -v` or by deleting the rows afterward. Safe to rerun against a
+# persistent database: every run uses unique run_ids and unique friction content.
 #
 # Usage: scripts/e2e.sh <API_KEY> [BASE_URL]
 #   BASE_URL defaults to http://127.0.0.1:8090
@@ -36,7 +36,7 @@ chk "list wrong key -> 401"   401 "$(req -H "X-Api-Key: nope" $BASE/api/v1/submi
 
 REVIEW=$(cat <<EOF
 {
-  "skill":"multi-llm-review","machine_name":"e2e-test","coordinator_model":"claude-fable-5",
+  "skill":"review-panel","machine_name":"e2e-test","coordinator_model":"claude-fable-5",
   "run_id":"$RUN-review","prompt":"e2e test prompt",
   "reviewers":[
     {"slot":"gpt56","model":"openai-codex/gpt-5.6-sol","status":"completed","duration_s":354,"bytes":2392,
@@ -49,7 +49,7 @@ EOF
 # 6 create review
 s=$(req -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d "$REVIEW" $BASE/api/v1/reviews)
 rid=$(jq -r .id "$BODY")
-chk "POST review -> 201" 201 "$s" "$(jq -r 'if .submission_type=="multi-llm-review" and (.payload.reviewers|length)==2 then 1 else 0 end' "$BODY")"
+chk "POST review -> 201" 201 "$s" "$(jq -r 'if .submission_type=="review-panel" and (.payload.reviewers|length)==2 then 1 else 0 end' "$BODY")"
 
 # 7 idempotent replay (identical content) -> 200, same id
 s=$(req -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d "$REVIEW" $BASE/api/v1/reviews)
@@ -127,7 +127,7 @@ chk "list friction: fields surfaced, payload omitted" 200 "$s" \
       and ((.submissions[]|select(.id==$fid)|.summary)|test("e2e friction")) then 1 else 0 end' "$BODY")"
 
 # 16 list filter type+machine for review
-s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions?type=multi-llm-review&machine=e2e-test&limit=5")
+s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions?type=review-panel&machine=e2e-test&limit=5")
 chk "list type+machine contains review" 200 "$s" "$(jq -r --argjson rid "$rid" 'if ([.submissions[].id]|index($rid)) != null then 1 else 0 end' "$BODY")"
 
 # 17 list bad since -> 400 ; 18 list bad processed -> 400

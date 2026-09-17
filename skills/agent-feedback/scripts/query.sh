@@ -27,7 +27,7 @@
 # exited 1.
 #
 # Examples:
-#   query.sh --type multi-llm-review --limit 20
+#   query.sh --type review-panel --limit 20
 #   query.sh --family friction --processed false
 #   query.sh 43 | jq .payload
 #   query.sh export >backup.ndjson

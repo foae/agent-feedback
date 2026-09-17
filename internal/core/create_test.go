@@ -35,7 +35,7 @@ func TestCreateReview_Validation(t *testing.T) {
 	validReviewer := ReviewerInput{Slot: "gpt56", Model: "openai-codex/gpt-5.6-sol", Status: "completed"}
 	base := func() CreateReviewInput {
 		return CreateReviewInput{
-			Skill: "multi-llm-review", MachineName: "workstation-a", CoordinatorModel: "claude-fable-5",
+			Skill: "review-panel", MachineName: "workstation-a", CoordinatorModel: "claude-fable-5",
 			RunID: "run-1", Reviewers: []ReviewerInput{validReviewer},
 		}
 	}

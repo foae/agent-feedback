@@ -18,7 +18,7 @@ import (
 
 func reviewInput(runID string) CreateReviewInput {
 	return CreateReviewInput{
-		Skill: "multi-llm-review", MachineName: "workstation-a", CoordinatorModel: "claude-fable-5",
+		Skill: "review-panel", MachineName: "workstation-a", CoordinatorModel: "claude-fable-5",
 		RunID: runID, Prompt: "review this",
 		Reviewers: []ReviewerInput{{Slot: "gpt56", Model: "openai-codex/gpt-5.6-sol", Status: "completed"}},
 	}

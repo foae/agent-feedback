@@ -10,6 +10,9 @@ Usage: mock_server.py <state_dir>
                               review_bad_created | export_no_terminator
                               (missing file -> created)
   <state_dir>/list_rows       how many rows the list/export fixtures hold (default 1)
+  <state_dir>/list_page_cap   optional hard cap on the rows returned per list
+                              page, so pagination can be exercised with a
+                              handful of rows (missing file -> no extra cap)
   <state_dir>/requests.jsonl  one JSON line per request received
 
 Contract notes this mock reproduces:
@@ -48,6 +51,14 @@ def list_rows():
             return int(f.read().strip())
     except (FileNotFoundError, ValueError):
         return 1
+
+
+def list_page_cap():
+    try:
+        with open(os.path.join(STATE, "list_page_cap")) as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return 0
 
 
 def summary_row(i):
@@ -164,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(201, dict(base, id="101"))
         elif m == "friction_wrong_duplicate":
             self._send(200, dict(base, id=55, family="review",
-                                 submission_type="multi-llm-review"))
+                                 submission_type="review-panel"))
         elif m == "reject400":
             self._send(400, {"error": "create_friction_failed",
                              "message": "invalid input: summary exceeds 2000 bytes"})
@@ -196,7 +207,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "with different content; submit the correction as a new "
                                         "submission (new run_id)"})
         elif m == "collision200":
-            self._send(200, {"id": 9, "family": "review", "submission_type": "multi-llm-review",
+            self._send(200, {"id": 9, "family": "review", "submission_type": "review-panel",
                              "run_id": "other-run", "machine_name": "other-machine",
                              "payload_hash": "hash-other"})
         elif m == "reject400":
@@ -277,6 +288,9 @@ class Handler(BaseHTTPRequestHandler):
             limit = 50
         include_payload = q.get("include", [""])[0] == "payload"
         limit = min(limit, 100 if include_payload else 500)
+        cap = list_page_cap()
+        if cap > 0:
+            limit = min(limit, cap)
         before_id = q.get("before_id", [None])[0]
         if "before_id" in q and "offset" in q:
             self._send(400, {"error": "bad_request",
