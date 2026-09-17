@@ -88,12 +88,27 @@ Every submission, whatever its family, is returned in one shape:
 | `family` | `friction`, `review` or `event`. Decides how the payload is shaped and how duplicates are handled. |
 | `submission_type` | `friction` for frictions; the submitting `skill` for reviews; the `kind` for events. |
 | `run_id` | Idempotency key within `(family, submission_type)`: the review `run_id` or the event `key`. `null` for frictions. |
-| `payload` | The submitted content, verbatim. Numbers are returned exactly as stored. |
-| `payload_hash` | SHA-256 hex over the canonical content (see [Idempotency](#idempotency-and-duplicates)). Equal hashes mean byte-identical content. |
+| `payload` | The stored content (see [Stored payload shapes](#stored-payload-shapes)). Numbers are returned exactly as stored. |
+| `payload_hash` | SHA-256 hex over the canonical content (see [Idempotency](#idempotency-and-duplicates)). Equal hashes mean the same content under the family's canonical form. |
 | `created_at` | Receipt time at the server. For frictions the client's own `context.occurred_at` records when it happened. |
-| `processed_at`, `resolution` | Set by a processor. `null` until then. |
+| `processed_at`, `resolution` | Set by a processor. Absent until then. |
 
-Fields with `null` values are always present; do not rely on omission.
+As in API 1.0, `run_id`, `processed_at` and `resolution` are **omitted** when
+unset rather than sent as `null`. `family` and `payload_hash` are always
+present. The example above shows the omitted fields as `null` only to list
+them.
+
+### Stored payload shapes
+
+| Family | `payload` as stored and returned |
+|---|---|
+| friction | `{category, summary, details?, suggested_fix?, project?, harness?, context?}`; `category` and `summary` trimmed; empty optional strings omitted |
+| review | `{prompt?, reviewers}`; `reviewers` entries as submitted with empty optionals omitted |
+| event | the submitted `payload` object, compacted (insignificant whitespace removed) with key order and number spelling preserved |
+
+Identifier fields (`machine_name`, `coordinator_model`, `skill`, `run_id`,
+`kind`, `key`) are trimmed of surrounding whitespace before validation,
+storage and hashing. Comparison is case-sensitive.
 
 ## Write endpoints
 
@@ -136,7 +151,7 @@ grading. The client builds this from a run directory; see the
 |---|---|---|---|
 | `skill` | string | yes | the submitting skill; `friction` is reserved and rejected |
 | `machine_name`, `coordinator_model` | string | yes | as for frictions |
-| `run_id` | string | yes | idempotency key with `skill`; must be unique per machine and run |
+| `run_id` | string | yes | idempotency key with `skill`. Uniqueness is `(family, skill, run_id)` and does not include the machine, so put the machine name in the value (`<machine>-<run_ts>-<pid>`) to keep machines from colliding |
 | `prompt` | string | no | the review prompt |
 | `reviewers` | array | yes, non-empty | one entry per reviewer |
 | `reviewers[].slot`, `.model`, `.status` | string | yes | `status` is free-form: `completed`, `timeout`, `error`, … |
@@ -159,9 +174,9 @@ free-form JSON object payload. Nothing in the service interprets the payload.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `kind` | string | yes | producer-chosen namespace, e.g. `deploy`, `benchmark`; `friction` is reserved |
-| `key` | string | yes | idempotency key within `kind`; make it unique per machine and occurrence |
+| `key` | string | yes | idempotency key within `kind`. Uniqueness is `(family, kind, key)` and does not include the machine; put the machine name in the value |
 | `machine_name`, `coordinator_model` | string | yes | as for frictions |
-| `payload` | object | yes | any JSON object |
+| `payload` | object | yes | any JSON object; duplicate keys anywhere in it are rejected with `400` |
 
 `201` new, `200` identical replay, `409 replay_mismatch` on different content
 under the same `(kind, key)`, `400 create_event_failed` on validation failure.
@@ -187,8 +202,9 @@ Filtered list, newest first (descending `id`). All parameters optional.
 | `model` | string | filters `coordinator_model` |
 | `since`, `until` | RFC 3339 | `created_at >=` / `<=` |
 | `processed` | `true` \| `false` | `false` is the processor's work queue |
-| `before_id` | int | keyset cursor: only rows with `id < before_id` |
-| `limit` | int | default 50, max 500 (max 100 with `include=payload`) |
+| `before_id` | int | keyset cursor: only rows with `id < before_id`. Preferred for paging |
+| `offset` | int | API 1.0 offset paging, default 0, clamped to `>= 0`. Cannot be combined with `before_id` (`400`) |
+| `limit` | int | default 50, max 500 (max 100 with `include=payload`); `<= 0` becomes 50 |
 | `include` | `payload` | return full records instead of summaries |
 
 Response:
@@ -197,6 +213,7 @@ Response:
 {
   "submissions": [ { "id": 43, "family": "friction", "…": "…" } ],
   "limit": 50,
+  "offset": 0,
   "total": 45,
   "has_more": false,
   "next_before_id": null
@@ -205,16 +222,23 @@ Response:
 
 - Rows are summaries: the record without `payload`, plus for frictions the
   `category`, `summary`, `project` and `harness` fields lifted to the top level
-  so a list is scannable. With `include=payload` rows are full records.
-- `total` counts every row matching the filters (ignoring `before_id` and
-  `limit`), computed in the same read transaction as the page.
+  so a list is scannable. With `include=payload` rows are full records; a
+  page can then be large (up to 100 records of up to 10 MiB each), so keep
+  `limit` small when payloads are big.
+- `total` counts every row matching the filters (ignoring `before_id`,
+  `offset` and `limit`), computed in the same read transaction as the page.
+  It is a per-response snapshot and changes as rows arrive or are marked.
 - `has_more` is true when rows older than this page match; `next_before_id` is
   then the `id` of the page's last row, ready to pass back as `before_id`.
-- `limit` echoes the value actually used after clamping.
+- `limit` and `offset` echo the values actually used after clamping.
 
-To drain a queue reliably: fetch pages with `processed=false` following
-`next_before_id` until `has_more` is false, collect the ids, act, then mark.
-Do not mark while paging; do not mix offset arithmetic into the loop.
+Draining a queue: page with `processed=false` following `next_before_id`
+until `has_more` is false. With `before_id` it is safe to act on and mark a
+page before fetching the next one (marking removes rows only above the
+cursor). With `offset` it is not: marking shifts later pages and skips rows.
+Rows created after the first page have higher ids and are picked up by the
+next pass. This is a best-effort traversal for one processor at a time, not a
+claim or lease; two concurrent processors can act on the same row.
 
 `400 bad_request` names any malformed parameter (`since must be RFC 3339`,
 `processed must be true or false`, `before_id must be a positive integer`, …).
@@ -231,17 +255,23 @@ The full record. `400 bad_request` if `{id}` is not numeric,
 
 ### GET /api/v1/export
 
-Every record as newline-delimited JSON (`Content-Type: application/x-ndjson`),
-ascending `id`, one full record per line, then a final line
+Every record as newline-delimited JSON (`Content-Type: application/x-ndjson`)
+in one consistent read transaction:
 
-```json
-{"export_complete":true,"count":676}
-```
+1. A header line: `{"export_format":1,"family":null,"since":null,"exported_at":"2026-09-17T20:06:48.000000Z"}`
+   (`family`/`since` echo the filters, `null` when unfiltered).
+2. One full record per line, ascending `id`.
+3. A terminator: `{"export_complete":true,"count":676,"sha256":"<hex>"}` where
+   `sha256` is over the record lines (each with its trailing newline), header
+   excluded.
 
-A stream without that terminator is truncated; do not treat it as a backup.
-Optional filters: `family`, `since`. The export is one consistent read
-transaction. This is the migration and off-host backup format; the `feedback
-import` command reads it (see [operate.md](operate.md#restore-and-migration)).
+A stream without the terminator, or whose record count or digest disagrees
+with it, is damaged; do not restore from it. Optional filters: `family`,
+`since`. Unfiltered exports are the logical backup and migration format; the
+`feedback import` command verifies the header, count and digest, refuses
+filtered exports unless told otherwise, and preserves ids, timestamps, hashes
+and processing state (see [operate.md](operate.md#restore-and-migration)).
+For a physical backup of the live database use `feedback backup`.
 
 ## Processing
 
@@ -254,10 +284,11 @@ existing row.
 |---|---|---|---|
 | `ids` | int array | yes, 1–500 entries, positive | duplicates are collapsed |
 | `processed` | bool | no, default `true` | `false` clears the mark |
-| `resolution` | string | no | ≤ 2000 bytes; what was done, e.g. `fixed in example@1a2b3c4`, `invalid: premise wrong`, `duplicate of 41`. Only with `processed=true`. |
+| `resolution` | string | no | ≤ 2000 bytes after trimming; what was done, e.g. `fixed in example@1a2b3c4`, `invalid: premise wrong`, `duplicate of 41`. Only with `processed=true`. Omitted or `null` means not given; an empty or whitespace-only string is a `400`. |
 
 One resolution applies to the whole batch. Issue one request per distinct
-resolution.
+resolution. The response echoes the trimmed `resolution` when one was given
+and omits it otherwise.
 
 `200` with every id classified:
 
@@ -286,16 +317,32 @@ resolution.
 | event | `(kind, key)` | `200` existing record | `409 replay_mismatch` |
 | friction | content hash, 24 h window | `200` existing record | new `201` row (it is a different friction) |
 
-Content identity is `payload_hash`: SHA-256 over a canonical JSON encoding of
-`{machine_name, coordinator_model, payload}` where object keys are sorted,
-numbers keep their textual form, and no insignificant whitespace is present.
-For frictions the `context` object is removed before hashing, so the same
-friction re-filed with a new timestamp, commit or working directory still
-dedupes. A friction re-encountered after the 24 h window is a new row on
-purpose: recurrence stays visible to the processor.
+Uniqueness for reviews and events is enforced on `(family, submission_type,
+run_id)`: a review and an event may use the same type and key without
+colliding, and the machine name is not part of the key.
+
+Content identity is `payload_hash`, SHA-256 hex over a canonical encoding of
+`{machine_name, coordinator_model, payload}`:
+
+- **Frictions and reviews** use the API 1.0 canonical form unchanged: the
+  fields in the fixed order `machine_name`, `coordinator_model`, `payload`,
+  with the stored payload shape above (fixed field order, empty optionals
+  omitted). For frictions the `context` object is removed before hashing, so
+  the same friction re-filed with a new timestamp, commit or working directory
+  still dedupes. Hashes computed by a 1.0 service for the same content are
+  identical, which is what makes imported rows replay-safe.
+- **Events** use canonical JSON: object keys sorted by byte order at every
+  level, strings escaped the way Go's `encoding/json` escapes them, numbers
+  kept as their textual form (`1`, `1.0` and `1e0` are different content),
+  no insignificant whitespace, duplicate keys rejected.
+
+A friction re-encountered after the 24 h window is a new row on purpose:
+recurrence stays visible to the processor.
 
 Concurrent identical writes are serialized by the database; exactly one row
-results. Rows imported from API 1.0 keep their original hash.
+results. Rows imported from API 1.0 keep their original hash; rows that
+predate hashing in 1.0 get one computed with the 1.0 form at import, so every
+stored row has a hash and replays are always compared.
 
 ## Operational endpoints
 
@@ -310,13 +357,18 @@ No authentication. Keep them inside the deployment boundary.
 
 ## Changes since API 1.0
 
-Everything from 1.0 still works unchanged. Additions:
+Every 1.0 request keeps working and every 1.0 response field keeps its name,
+type and omission behaviour. Additions:
 
-- `family` on every record and as a list filter; `POST /api/v1/events`.
-- `payload_hash`, `resolution` and explicit `null`s on every record.
-- `resolution` on the processed endpoint; re-marking with a new resolution counts as `updated`.
-- `before_id`, `include=payload`, `total`, `has_more`, `next_before_id` on the list endpoint.
+- `family` and `payload_hash` on every record; `family` as a list filter;
+  `POST /api/v1/events`.
+- `resolution` on the processed endpoint and on records; re-marking with a
+  new resolution counts as `updated`.
+- `before_id`, `include=payload`, `total`, `has_more`, `next_before_id` on
+  the list endpoint. `offset` stays supported.
 - `GET /api/v1/export`.
-- Timestamps carry microseconds.
-- Review replays against rows created before payload hashing existed no longer
-  occur: every stored row has a hash.
+- Timestamps always carry exactly six fractional digits (1.0 emitted
+  whatever precision the database held, from none to six).
+- Every stored row has a hash, so the 1.0 "legacy row without hash replays
+  without comparison" case no longer exists.
+- `GET /ready` also checks the schema version.
