@@ -291,6 +291,22 @@ submit_run() {
   payload="$AF_PAYLOAD_FILE"
   run_id=$(jq -r '.run_id' "$payload")
 
+  # The server's 10 MiB body cap, enforced before the round trip: with
+  # --include-outputs a single verbose reviewer can push a run past it, and a
+  # 413 would cost the upload first. Sweep warns and moves on; direct mode says
+  # so and exits 1.
+  local payload_bytes
+  payload_bytes=$(wc -c <"$payload" | tr -d ' ')
+  if [ "$payload_bytes" -gt "$AF_MAX_BODY_BYTES" ]; then
+    rm -f "$payload"
+    af_warn "$run_id: review request body is $payload_bytes bytes, over the ${AF_MAX_BODY_BYTES}-byte limit — NOT submitting (drop --include-outputs)"
+    [ "$mode" = sweep ] && return 0
+    af_outcome "$(jq -cn --arg run_id "$run_id" --argjson n "$payload_bytes" \
+      --argjson max "$AF_MAX_BODY_BYTES" \
+      '{status:"rejected",reason:"body_too_large",run_id:$run_id,bytes:$n,limit:$max}')"
+    return 1
+  fi
+
   af_request POST "/api/v1/reviews" "$payload"
   case "$AF_HTTP_CODE" in
     201|200)
@@ -330,6 +346,13 @@ submit_run() {
       # this run dir's data does NOT match what was already submitted.
       af_outcome "$(jq -cn --arg run_id "$run_id" --arg msg "$(jq -r '.message // ""' "$AF_RESP" 2>/dev/null | head -c 400)" \
         '{status:"mismatch",run_id:$run_id,message:$msg}')"
+      rc=1
+      ;;
+    1*|3*)
+      # A redirect (or an informational status) means the configured URL is not
+      # the service. Spooling it would retry a misconfiguration for 30 days.
+      af_outcome "$(jq -cn --arg run_id "$run_id" --argjson code "$AF_HTTP_CODE" --arg msg "$(jq -r '.message // ""' "$AF_RESP" 2>/dev/null | head -c 400)" \
+        '{status:"rejected",run_id:$run_id,http_status:$code,message:$msg}')"
       rc=1
       ;;
     5*)

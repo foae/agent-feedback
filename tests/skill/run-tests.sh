@@ -207,8 +207,12 @@ chk "next call flushes spooled friction" "$(jq -n --argjson n "$n_spool" --argjs
   --argjson f "${flushed_ok:-0}" 'if $n==0 and $sent==2 and $f==1 then 1 else 0 end')"
 
 # 7a. A spool that cannot be written must NEVER report "spooled": the payload
-# is echoed to stderr instead and the outcome says so.
-chmod 555 "$SPOOL"
+# is echoed to stderr instead and the outcome says so. The directory is now
+# narrowed to 700 on every spool, so a mode-555 directory this user owns is no
+# longer unwritable — the durable way to make the spool unusable is a regular
+# FILE sitting at its path, which makes mkdir fail.
+rm -rf "$SPOOL"
+: >"$SPOOL"
 export AGENT_FEEDBACK_URL="http://127.0.0.1:1"
 err="$WORK/spool-fail.err"
 out=$(bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "unspoolable" --model m 2>"$err")
@@ -217,12 +221,28 @@ o=$(outcome "$out")
 export AGENT_FEEDBACK_URL="$saved_url"
 echoed=$(grep -c 'unspoolable' "$err")
 n_spool=$(find "$SPOOL" -name 'friction-*' 2>/dev/null | wc -l | tr -d ' ')
-chmod 755 "$SPOOL"
-chk "read-only spool -> failed outcome, exit 1, payload echoed to stderr" "$(jq -n --arg o "$o" \
+rm -f "$SPOOL"; mkdir -p "$SPOOL"
+chk "unwritable spool -> failed outcome, exit 1, payload echoed to stderr" "$(jq -n --arg o "$o" \
   --argjson rc "$rc" --argjson e "$echoed" --argjson n "$n_spool" \
   '($o|fromjson) as $j |
    if $j.status=="failed" and $j.reason=="spool_unwritable" and ($j.path|length>0)
       and $rc==1 and $e>=1 and $n==0 then 1 else 0 end')"
+
+# 7a-perm. A spool left world-readable by an older client (or a loose umask) is
+# narrowed on the next spool: the directory to 700, the payload written to 600.
+rm -rf "$SPOOL"
+mkdir -p "$SPOOL"
+chmod 755 "$SPOOL"
+printf 'legacy\n' >"$SPOOL/legacy-notes.txt"
+chmod 644 "$SPOOL/legacy-notes.txt"
+export AGENT_FEEDBACK_URL="http://127.0.0.1:1"
+bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "widen-then-narrow" --model m >/dev/null 2>&1
+export AGENT_FEEDBACK_URL="$saved_url"
+spool_file=$(find "$SPOOL" -name 'friction-*.json' | head -n1)
+chk "a pre-existing 0755 spool is narrowed to 0700 and the new payload is 0600" \
+  "$([ "$(mode_of "$SPOOL")" = "0o700" ] && [ -n "$spool_file" ] \
+    && [ "$(mode_of "$spool_file")" = "0o600" ] && echo 1 || echo 0)"
+rm -f "$SPOOL"/* 2>/dev/null || true
 
 # 7b. An unreadable spool directory must not swallow the outcome line.
 chmod 000 "$SPOOL"
@@ -1228,6 +1248,159 @@ chk "digest makes a fresh directory per run and refuses a non-empty --out" \
 
 # 43. digest.sh is executable as shipped (it is invoked directly, not via bash).
 chk "digest.sh is executable" "$([ -x "$TRIAGE_SCRIPTS/digest.sh" ] && echo 1 || echo 0)"
+
+# ── receipt comparability: only a well-formed receipt can claim a collision ──
+
+# 44. A receipt whose id is a STRING is not comparable, even when it names a
+# foreign key: it proves nothing, so the event is spooled, never called a
+# collision. The same holds for a body holding two JSON documents.
+set_mode event_bad_id_foreign_key
+rm -f "$SPOOL"/* 2>/dev/null || true
+out=$(printf '%s' '{"a":1}' | bash "$SCRIPTS/submit-event.sh" --kind deploy --key strid-key --stdin --model m 2>/dev/null); rc=$?
+n_spool=$(find "$SPOOL" -name 'event-*.json' 2>/dev/null | wc -l | tr -d ' ')
+strid_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson n "$n_spool" '($o|fromjson) as $j |
+  if $j.status=="spooled" and $j.reason=="malformed_success_response" and $rc==0 and $n==1 then 1 else 0 end')
+rm -f "$SPOOL"/* 2>/dev/null || true
+set_mode event_two_docs
+out=$(printf '%s' '{"a":1}' | bash "$SCRIPTS/submit-event.sh" --kind deploy --key twodoc-key --stdin --model m 2>/dev/null); rc=$?
+n_spool=$(find "$SPOOL" -name 'event-*.json' 2>/dev/null | wc -l | tr -d ' ')
+twodoc_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson n "$n_spool" '($o|fromjson) as $j |
+  if $j.status=="spooled" and $j.reason=="malformed_success_response" and $rc==0 and $n==1 then 1 else 0 end')
+chk "string id with a foreign key and a two-document body are spooled, never a collision" \
+  "$([ "$strid_ok" = 1 ] && [ "$twodoc_ok" = 1 ] && echo 1 || echo 0)"
+set_mode created
+rm -f "$SPOOL"/* 2>/dev/null || true
+
+# ── paging contract: a 200 without it is malformed, not an empty queue ───────
+
+# 45. A 200 carrying {} has no has_more/submissions/total: reporting it as the
+# end of the walk would be indistinguishable from an empty queue.
+set_mode list_bad_shape
+out=$(bash "$SCRIPTS/process.sh" list 2>/dev/null); rc=$?
+list_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="error" and $j.message=="malformed pagination response" and $rc==1 then 1 else 0 end')
+out=$(bash "$TRIAGE_SCRIPTS/digest.sh" --out "$WORK/digest-badshape" 2>/dev/null); rc=$?
+digest_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="error" and $j.message=="malformed pagination response" and $rc==1 then 1 else 0 end')
+chk "a {} 200 is an error outcome for list and digest, not an empty queue" \
+  "$([ "$list_ok" = 1 ] && [ "$digest_ok" = 1 ] && echo 1 || echo 0)"
+set_mode created
+
+# ── flags that need a value ─────────────────────────────────────────────────
+
+# 46. A flag with no value must be rejected, never `shift 2` into a `set -e`
+# death — and never an endless loop where `set -e` happens to be disabled.
+# Each call is watchdogged so a regression fails the suite instead of hanging.
+run_with_timeout() { # <secs> <outfile> <cmd...>
+  local secs="$1" outf="$2"; shift 2
+  "$@" >"$outf" 2>/dev/null &
+  local pid=$! rc=0
+  ( sleep "$secs"; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local watch=$!
+  wait "$pid" || rc=$?
+  kill "$watch" 2>/dev/null
+  wait "$watch" 2>/dev/null
+  return "$rc"
+}
+before=$(log_len)
+run_with_timeout 10 "$WORK/noval1.out" bash "$SCRIPTS/submit-event.sh" --kind; rc=$?
+ev_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval1.out")")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("--kind requires a value")) and $rc==1 then 1 else 0 end' 2>/dev/null || echo 0)
+run_with_timeout 10 "$WORK/noval2.out" bash "$SCRIPTS/query.sh" export --family; rc=$?
+qx_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval2.out")")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("--family requires a value")) and $rc==1 then 1 else 0 end' 2>/dev/null || echo 0)
+run_with_timeout 10 "$WORK/noval3.out" bash "$SCRIPTS/query.sh" --type; rc=$?
+q_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval3.out")")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("requires a value")) and $rc==1 then 1 else 0 end' 2>/dev/null || echo 0)
+run_with_timeout 10 "$WORK/noval4.out" bash "$SCRIPTS/process.sh" list --family; rc=$?
+pl_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval4.out")")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("requires a value")) and $rc==1 then 1 else 0 end' 2>/dev/null || echo 0)
+run_with_timeout 10 "$WORK/noval5.out" bash "$SCRIPTS/process.sh" done 43 --resolution; rc=$?
+pd_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval5.out")")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("requires a value")) and $rc==1 then 1 else 0 end' 2>/dev/null || echo 0)
+run_with_timeout 10 "$WORK/noval6.out" bash "$SCRIPTS/submit-friction.sh" --category; rc=$?
+sf_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval6.out")")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("requires a value")) and $rc==1 then 1 else 0 end' 2>/dev/null || echo 0)
+run_with_timeout 10 "$WORK/noval7.out" bash "$TRIAGE_SCRIPTS/digest.sh" --out; rc=$?
+dg_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval7.out")")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("requires a value")) and $rc==1 then 1 else 0 end' 2>/dev/null || echo 0)
+chk "a value-less flag -> rejected outcome, exit 1, no request, no loop" \
+  "$([ "$ev_ok" = 1 ] && [ "$qx_ok" = 1 ] && [ "$q_ok" = 1 ] && [ "$pl_ok" = 1 ] \
+     && [ "$pd_ok" = 1 ] && [ "$sf_ok" = 1 ] && [ "$dg_ok" = 1 ] \
+     && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
+
+# ── redirects are a misconfigured URL, not a retryable failure ───────────────
+
+# 47. A 3xx must be rejected with its status, never spooled for 30 days.
+set_mode redirect
+rm -f "$SPOOL"/* 2>/dev/null || true
+out=$(bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "redirected" --model m 2>/dev/null); rc=$?
+n_spool=$(find "$SPOOL" -name 'friction-*' 2>/dev/null | wc -l | tr -d ' ')
+chk "friction 302 -> rejected with http_status, exit 1, not spooled" "$(jq -n \
+  --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson n "$n_spool" \
+  '($o|fromjson) as $j |
+   if $j.status=="rejected" and $j.http_status==302 and $rc==1 and $n==0 then 1 else 0 end')"
+set_mode created
+rm -f "$SPOOL"/* 2>/dev/null || true
+
+# ── submit-review.sh: the 10 MiB body cap ───────────────────────────────────
+
+# 48. --include-outputs can push a run past the server's request-body cap: the
+# check happens before the upload, and sweep only warns.
+RUN_BIG="$RUN_BASE/20200101-000006-big"
+mkdir -p "$RUN_BIG"
+cat >"$RUN_BIG/meta.json" <<'JSON'
+{"machine":"testmach","skill":"review-panel","run_ts":"20200101-000006",
+ "caller":"caller","slots":{"one":{"label":"Big Output"}}}
+JSON
+printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$RUN_BIG/summary.tsv"
+printf '20200101-000006\tx\tBig Output\t5\t1\t0\tok\n' >>"$RUN_BASE/scorecards.tsv"
+python3 -c 'import sys; sys.stdout.write("O"*11010048)' >"$RUN_BIG/one.md"
+before=$(log_len)
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_BIG" --include-outputs 2>/dev/null); rc=$?
+n_spool=$(find "$SPOOL" -name 'review-*' 2>/dev/null | wc -l | tr -d ' ')
+direct_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson n "$n_spool" '($o|fromjson) as $j |
+  if $j.status=="rejected" and $j.reason=="body_too_large" and $j.limit==10485760
+     and $rc==1 and $n==0 then 1 else 0 end')
+chk "oversized review body -> rejected locally before the upload, no request" \
+  "$([ "$direct_ok" = 1 ] && [ "$(log_len)" -eq "$before" ] && [ ! -e "$RUN_BIG/.submitted" ] && echo 1 || echo 0)"
+# The same run submitted without outputs fits and goes through.
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_BIG" 2>/dev/null); rc=$?
+chk "the same run without --include-outputs still submits" "$(jq -n \
+  --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="submitted" and $rc==0 then 1 else 0 end')"
+rm -rf "$RUN_BIG"
+
+# ── export: a filtered header on an unfiltered request ──────────────────────
+
+# 49. An unfiltered export whose header reports a filter is a subset of the
+# database: the error goes to stderr so stdout stays pure NDJSON.
+set_mode export_filtered_header
+set_list_rows 2
+out=$(bash "$SCRIPTS/query.sh" export 2>"$WORK/export5.err"); rc=$?
+err_outcome=$(grep -c '"status":"error"' "$WORK/export5.err")
+case "$(cat "$WORK/export5.err")" in *"reports a filtered export"*) msg_ok=1 ;; *) msg_ok=0 ;; esac
+stdout_pure=$(printf '%s\n' "$out" | head -n1 | jq -r 'if .export_format==1 then 1 else 0 end' 2>/dev/null || echo 0)
+chk "unfiltered export with a filtered header -> error on stderr, exit 1, stdout pure NDJSON" \
+  "$([ "$rc" = 1 ] && [ "$err_outcome" -ge 1 ] && [ "$msg_ok" = 1 ] && [ "$stdout_pure" = 1 ] && echo 1 || echo 0)"
+# Asking for that filter makes the same header correct.
+out=$(bash "$SCRIPTS/query.sh" export --family friction 2>"$WORK/export6.err"); rc=$?
+case "$(cat "$WORK/export6.err")" in *"export verified"*) verified=1 ;; *) verified=0 ;; esac
+chk "the same header verifies when --family was actually requested" \
+  "$([ "$rc" = 0 ] && [ "$verified" = 1 ] && echo 1 || echo 0)"
+set_mode created
+set_list_rows 1
+
+# ── process.sh: the classification must answer THIS request ─────────────────
+
+# 50. A well-shaped 200 that classifies submissions nobody asked about is not
+# an answer: echoing it would report a mark that never happened.
+set_mode processed_foreign_ids
+out=$(bash "$SCRIPTS/process.sh" done 43 2>/dev/null); rc=$?
+chk "processed 200 naming foreign ids -> error outcome, exit 1" "$(jq -n \
+  --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="error" and $rc==1 then 1 else 0 end')"
+set_mode created
 
 echo
 echo "skill tests: $pass passed, $fail failed"

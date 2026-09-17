@@ -10,8 +10,12 @@ Usage: mock_server.py <state_dir>
                               review_bad_created | review_wrong_type |
                               review_unparseable | event_bad_created |
                               event_unparseable | event_collision |
-                              pagination_bad | processed_bad |
+                              event_bad_id_foreign_key | event_two_docs |
+                              pagination_bad | list_bad_shape |
+                              processed_bad | processed_foreign_ids |
+                              redirect |
                               export_no_terminator | export_bad_header |
+                              export_filtered_header |
                               export_http_500 | export_empty
                               (missing file -> created)
   <state_dir>/list_rows       how many rows the list/export fixtures hold (default 1)
@@ -151,6 +155,17 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             body = {}
         m = mode()
+        if m == "redirect":
+            # A misconfigured URL answering with a redirect: the client must
+            # reject it, never spool it for 30 days of retries.
+            data = json.dumps({"error": "moved", "message": "see other"}).encode()
+            self.send_response(302)
+            self.send_header("Location", "https://example.invalid/api/v1")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path == "/api/v1/frictions":
             self._frictions(m, body)
         elif self.path == "/api/v1/reviews":
@@ -158,6 +173,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/v1/events":
             self._events(m, body)
         elif self.path == "/api/v1/submissions/processed":
+            if m == "processed_foreign_ids":
+                # A 200 in the right shape that classifies a submission nobody
+                # asked about: the mark it reports is not the mark performed.
+                self._send(200, {"processed": bool(body.get("processed", True)),
+                                 "updated": [999999], "unchanged": [], "not_found": []})
+                return
             if m == "processed_bad":
                 # A 200 that is not the documented classification shape.
                 self._send(200, {"ok": True})
@@ -242,6 +263,7 @@ class Handler(BaseHTTPRequestHandler):
         elif m == "collision200":
             self._send(200, {"id": 9, "family": "review", "submission_type": "review-panel",
                              "run_id": "other-run", "machine_name": "other-machine",
+                             "coordinator_model": "other-model",
                              "payload_hash": "hash-other"})
         elif m == "reject400":
             self._send(400, {"error": "create_review_failed",
@@ -256,6 +278,26 @@ class Handler(BaseHTTPRequestHandler):
                              "run_id": body.get("key"),
                              "machine_name": body.get("machine_name")})
             return
+        if m == "event_bad_id_foreign_key":
+            # A receipt naming someone else's key, but with a string id: it is
+            # NOT comparable, so it proves no collision — only that the body is
+            # malformed and the event must be retried.
+            self._send(201, {"id": "9", "family": "event",
+                             "submission_type": body.get("kind"),
+                             "run_id": "someone-elses-key",
+                             "machine_name": "other-machine",
+                             "coordinator_model": "other-model"})
+            return
+        if m == "event_two_docs":
+            # Two concatenated JSON documents: jq would read the first and
+            # ignore the second, so the body is not a receipt at all.
+            one = json.dumps({"id": 601, "family": "event",
+                              "submission_type": body.get("kind"),
+                              "run_id": body.get("key"),
+                              "machine_name": body.get("machine_name"),
+                              "coordinator_model": body.get("coordinator_model")})
+            self._send_raw(201, (one + "\n" + one + "\n").encode(), "application/json")
+            return
         if m == "event_unparseable":
             self._send_raw(201, b"{not json", "application/json")
             return
@@ -263,7 +305,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"id": 9, "family": "event",
                              "submission_type": body.get("kind"),
                              "run_id": "someone-elses-key",
-                             "machine_name": "other-machine"})
+                             "machine_name": "other-machine",
+                             "coordinator_model": "other-model"})
             return
         if m == "reject400":
             self._send(400, {"error": "create_event_failed",
@@ -365,6 +408,11 @@ class Handler(BaseHTTPRequestHandler):
             ids = ids[offset:]
         page = ids[:limit]
         has_more = len(ids) > len(page)
+        if mode() == "list_bad_shape":
+            # A 200 that carries none of the paging contract. Reading it as an
+            # empty last page would look exactly like an empty queue.
+            self._send(200, {})
+            return
         if mode() == "pagination_bad":
             # has_more with no usable cursor: following it would silently
             # truncate the queue.
@@ -393,6 +441,12 @@ class Handler(BaseHTTPRequestHandler):
         since = q.get("since", [None])[0]
         if m == "export_bad_header":
             header = json.dumps({"submissions": "this is not an export header"})
+        elif m == "export_filtered_header":
+            # A well-formed header that reports a filter the caller never asked
+            # for: the stream is a subset of the database.
+            header = json.dumps({"export_format": 1, "family": "friction",
+                                 "since": None,
+                                 "exported_at": "2026-07-30T00:00:00.000000Z"})
         else:
             header = json.dumps({"export_format": 1, "family": family, "since": since,
                                  "exported_at": "2026-07-30T00:00:00.000000Z"})

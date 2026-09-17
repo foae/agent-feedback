@@ -29,8 +29,12 @@ COMMON="$SCRIPT_DIR/../../agent-feedback/scripts/_common.sh"
 OUT="" FAMILY="friction"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --out) OUT="${2:-}"; shift 2 ;;
-    --family) FAMILY="${2:-friction}"; shift 2 ;;
+    # `shift 2` with one argument left fails and would kill the script under
+    # `set -e` without a machine-readable outcome.
+    --out) [ $# -ge 2 ] || af_reject "$1 requires a value"
+           OUT="$2"; shift 2 ;;
+    --family) [ $# -ge 2 ] || af_reject "$1 requires a value"
+              FAMILY="$2"; shift 2 ;;
     *) echo "feedback-triage: unknown flag $1" >&2
        af_outcome "$(jq -cn --arg m "unknown flag $1" '{status:"rejected",message:$m}')"
        exit 1 ;;
