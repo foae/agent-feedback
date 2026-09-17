@@ -47,7 +47,9 @@ Breaking operational contract, compatible API.
 - **Storage**: PostgreSQL replaced by SQLite (`modernc.org/sqlite`, pure Go).
   One container, one named volume, no database service. Physical backups via
   `feedback backup`, logical via `GET /api/v1/export`; restore and migration
-  via `feedback import`. See [operate.md](operate.md#restore-and-migration)
+  via `feedback import` (all-or-nothing, header/count/digest verified, hashes
+  recomputed, `--family` filter, ids never reused). See
+  [operate.md](operate.md#restore-and-migration)
   for the 1.x migration procedure; `scripts/export-v1-postgres.sh` produces
   the import file from a 1.x deployment with ids, timestamps, processing state
   and hashes preserved.
