@@ -125,8 +125,9 @@ build_payload() {
   coordinator=$(af_trim "$coordinator")
   [ -n "$coordinator" ] || coordinator="unknown"
 
-  [ -n "$machine" ] && [ -n "$skill" ] && [ -n "$run_ts" ] \
-    || { af_skip "$fallback_id" "malformed meta.json (machine/skill/run_ts missing)"; return 1; }
+  if [ -z "$machine" ] || [ -z "$skill" ] || [ -z "$run_ts" ]; then
+    af_skip "$fallback_id" "malformed meta.json (machine/skill/run_ts missing)"; return 1
+  fi
 
   run_id="$machine-$(basename "$run_dir")"
 
