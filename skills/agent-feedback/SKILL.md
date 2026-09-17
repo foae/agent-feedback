@@ -47,6 +47,12 @@ AGENT_FEEDBACK_REVIEW_DIRS optional: colon-separated review run-directory roots 
 Check the install: `bash scripts/submit-friction.sh --category test --summary "install check" --model <your model> --dry-run`
 prints the payload and `{"status":"valid"}` without sending anything.
 
+Uninstall: flush or discard the spool (`bash scripts/query.sh --flush --limit 1`,
+or `rm -rf ~/.cache/agent-feedback`), delete this directory (and the sibling
+`feedback-triage` if installed) from every harness's skills location, and
+remove the `AGENT_FEEDBACK_*` variables from shell profiles. Removing the
+service itself is described in the repository's `docs/operate.md`.
+
 ## Submit a friction
 
 Prefer stdin JSON for prose: no shell quoting, newlines and quotes survive.

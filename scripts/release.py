@@ -34,6 +34,14 @@ def main():
     if run("git", "tag", "--list", args.version) or run("git", "ls-remote", "origin", "refs/tags/" + args.version):
         sys.exit("Tag already exists; never replace a published version")
     repo = run("gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
+    # The tag is pushed over git (SSH key), the release over the gh token. A
+    # token for an account without push access fails only after the tag is
+    # already public, with a misleading "workflow scope" hint; check up front.
+    perms = json.loads(run("gh", "api", f"repos/{repo}", "--jq", ".permissions"))
+    if not perms.get("push"):
+        login = run("gh", "api", "user", "--jq", ".login")
+        sys.exit(f"gh is authenticated as {login}, which has no push access to {repo}; "
+                 "the release step needs a token for an account that can write to the repository")
     runs = json.loads(run("gh", "run", "list", "--repo", repo, "--workflow", "ci.yml", "--event", "push", "--commit", sha,
                           "--limit", "100", "--json", "databaseId,headSha,status,conclusion"))
     if not runs or runs[0]["headSha"] != sha:

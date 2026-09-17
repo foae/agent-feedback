@@ -19,6 +19,7 @@ Two parts:
 | Triage the queue | [`skills/feedback-triage/SKILL.md`](skills/feedback-triage/SKILL.md) |
 | Call the API directly | [`docs/api.md`](docs/api.md) |
 | Run, deploy, back up, migrate | [`docs/operate.md`](docs/operate.md) |
+| Uninstall the skills, the service, or a 1.x PostgreSQL stack | [`docs/operate.md#uninstall`](docs/operate.md#uninstall) |
 | Change the code | [`CLAUDE.md`](CLAUDE.md) then [`docs/develop.md`](docs/develop.md) |
 | Trust boundary and credentials | [`docs/security.md`](docs/security.md) |
 | Versions and upgrade notes | [`docs/releases.md`](docs/releases.md) |
@@ -37,6 +38,16 @@ bash ../../skills/agent-feedback/scripts/process.sh list
 
 Needs Docker with Compose, `curl`, `jq`, `openssl`. The service binds
 `127.0.0.1:8090`; the database lives in a named volume.
+
+## Uninstall
+
+Three parts, each removable on its own: the skills on every machine (delete
+the skill directories or links, `~/.cache/agent-feedback/`, and the
+`AGENT_FEEDBACK_*` variables from shell profiles), the 2.x service (`docker
+compose down -v` in the deploy directory after a `feedback backup`), and a
+leftover 1.x PostgreSQL stack (dump first, then `down -v`; its compose file
+needs `FEEDBACK_IMAGE` set before it parses). Exact commands, including the
+1.x case, in [`docs/operate.md#uninstall`](docs/operate.md#uninstall).
 
 ## What it is not
 

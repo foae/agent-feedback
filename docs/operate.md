@@ -6,7 +6,8 @@ SQLite file, one API key. Every step is a command an agent can run.
 Contents: [Run locally](#run-locally) · [Deploy to a host](#deploy-to-a-host) ·
 [Configuration](#configuration) · [Backups](#backups) ·
 [Restore and migration](#restore-and-migration) · [Upgrade](#upgrade) ·
-[Key rotation](#key-rotation) · [Retention](#retention) · [Monitoring](#monitoring)
+[Key rotation](#key-rotation) · [Retention](#retention) · [Monitoring](#monitoring) ·
+[Uninstall](#uninstall)
 
 ## Run locally
 
@@ -200,3 +201,76 @@ age out on their own.
   `feedback_db_bytes` (database plus WAL size); `feedback_sqlite_busy_total`
   (writes that waited out the busy timeout, should stay at zero).
 - Logs are JSON on stdout: `docker compose logs -f feedback`.
+
+## Uninstall
+
+Three independent parts: the skills on each machine, the 2.x service, and,
+where one still exists, the 1.x PostgreSQL stack. Take a backup before
+removing any service; the data is gone with the volume.
+
+### Skills, on every machine that has them
+
+1. Find the installed copies: `ls -la ~/.claude/skills/agent-feedback ~/.claude/skills/feedback-triage ~/.agents/skills/agent-feedback ~/.agents/skills/feedback-triage 2>/dev/null`
+   and any other harness skill directory you use. Entries may be symlinks into
+   a shared checkout; remove the links, then the checkout if nothing else uses it.
+2. Flush or discard unsent payloads first: `bash <skill-dir>/scripts/query.sh --flush --limit 1`
+   sends whatever is spooled; or delete `~/.cache/agent-feedback/` to drop it.
+3. Remove the directories or links, then `rm -rf ~/.cache/agent-feedback`.
+4. Remove `AGENT_FEEDBACK_URL`, `AGENT_FEEDBACK_API_KEY`, `AGENT_FEEDBACK_MACHINE`,
+   `AGENT_FEEDBACK_MODEL`, `AGENT_FEEDBACK_HARNESS`, `AGENT_FEEDBACK_SESSION_ID`
+   and `AGENT_FEEDBACK_REVIEW_DIRS` from shell profiles (`grep -n AGENT_FEEDBACK ~/.zshenv ~/.zshrc ~/.bashrc ~/.profile 2>/dev/null`).
+5. Remove any directive in your agent system prompt that tells agents to
+   submit friction, and any hook in a review runner that calls `submit-review.sh`.
+
+### The 2.x service (SQLite)
+
+On the host, in the directory holding `docker-compose.yml` (default `~/agent-feedback`):
+
+```bash
+cd ~/agent-feedback
+docker compose exec feedback /opt/feedback backup /data/final.db && docker compose cp feedback:/data/final.db ./final-backup.db   # keep a copy elsewhere
+docker compose down -v          # stops the container and deletes the feedback-data volume
+docker image rm $(sed -n 's/^FEEDBACK_IMAGE=//p' .env)
+cd ~ && rm -rf ~/agent-feedback  # compose file, .env with the API key, local backups
+```
+
+Skip `-v` and the last line to keep the data for a later reinstall. Also
+remove any reverse-proxy or firewall rule that exposed port 8090, and any
+monitoring scrape of `/metrics`.
+
+### The 1.x service (PostgreSQL)
+
+The 1.x stack is two containers (`feedback`, `postgres`) and a volume named
+`<project>_postgres-data`, where `<project>` is the compose project (the
+directory name, usually `agent-feedback`). Its `.env` holds `API_KEY`,
+`POSTGRES_PASSWORD` and `POSTGRES_URL`, and its compose file may require
+`FEEDBACK_IMAGE` to be set before compose will even parse it.
+
+```bash
+cd ~/agent-feedback
+export FEEDBACK_IMAGE=$(docker inspect --format '{{.Config.Image}}' agent-feedback-feedback-1 2>/dev/null || echo unused:latest)
+# Keep the data: a database dump, and the API 1.1 export if you may migrate later
+docker compose exec -T postgres pg_dump -U feedback -d feedback -Fc </dev/null > feedback-final.dump
+bash /path/to/agent-feedback/scripts/export-v1-postgres.sh </dev/null > v1.jsonl
+# Remove
+docker compose down -v          # both containers, the network, the postgres-data volume
+docker image rm "$FEEDBACK_IMAGE" postgres:18-alpine 2>/dev/null || true
+cd ~ && rm -rf ~/agent-feedback
+```
+
+If a 2.x service was installed in the same directory during a migration, the
+1.x volume is still there under the old name: list it with
+`docker volume ls | grep postgres-data` and remove it with
+`docker volume rm <name>` once the migration is confirmed. Stale 1.x images
+tagged `ghcr.io/foae/agent-feedback:<sha>` can be listed with `docker images ghcr.io/foae/agent-feedback`.
+
+If 1.x was deployed with the old `scripts/deploy.sh`, nothing else was
+installed on the host; the local machine may still hold `.private/deploy.env`
+in the repository checkout.
+
+### Verify
+
+`curl -s -o /dev/null -w '%{http_code}\n' http://<host>:8090/health` must fail
+to connect; `docker ps -a | grep agent-feedback` and `docker volume ls | grep
+feedback` must be empty; a fresh shell must have no `AGENT_FEEDBACK_*`
+variables.
