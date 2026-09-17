@@ -202,5 +202,122 @@ chk "processed trailing JSON value -> 400" 400 "$s"
 s=$(req -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' --data-binary @"$BIG" $BASE/api/v1/reviews)
 chk "body over 10 MiB -> 413" 413 "$s"
 
+# 29 record shape: family and payload_hash on every record, run_id absent for frictions
+s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions/$fid")
+chk "record carries family + payload_hash" 200 "$s" \
+  "$(jq -r 'if .family=="friction" and (.payload_hash|type)=="string" and (.payload_hash|length)==64 and .run_id==null then 1 else 0 end' "$BODY")"
+
+EVENT=$(cat <<EOF
+{"kind":"deploy","key":"$RUN-deploy","machine_name":"e2e-test","coordinator_model":"claude-fable-5",
+ "payload":{"service":"agent-feedback","image":"sha-e2e","ok":true,"attempts":2}}
+EOF
+)
+
+# 30 create event
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' -d "$EVENT" $BASE/api/v1/events)
+eid=$(jq -r .id "$BODY")
+chk "POST event -> 201" 201 "$s" \
+  "$(jq -r 'if .family=="event" and .submission_type=="deploy" and .payload.attempts==2 and .run_id!=null then 1 else 0 end' "$BODY")"
+
+# 31 identical event replay (different key order) -> 200 same id
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "$(jq -c '.payload={"ok":true,"attempts":2,"image":"sha-e2e","service":"agent-feedback"}' <<<"$EVENT")" $BASE/api/v1/events)
+chk "replay event -> 200 same id" 200 "$s" "$(jq -r --argjson eid "$eid" 'if .id==$eid then 1 else 0 end' "$BODY")"
+
+# 32 different event content under the same key -> 409
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "$(jq -c '.payload.attempts=3' <<<"$EVENT")" $BASE/api/v1/events)
+chk "event changed content -> 409" 409 "$s" "$(jq -r 'if .error=="replay_mismatch" then 1 else 0 end' "$BODY")"
+
+# 33 reserved event kind -> 400
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "$(jq -c --arg k "$RUN-reserved" '.kind="friction" | .key=$k' <<<"$EVENT")" $BASE/api/v1/events)
+chk "event kind=friction -> 400" 400 "$s"
+
+# 34 event payload must be an object
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "$(jq -c --arg k "$RUN-badpayload" '.key=$k | .payload=[1,2]' <<<"$EVENT")" $BASE/api/v1/events)
+chk "event payload array -> 400" 400 "$s"
+
+# 35 list family filter + counters
+s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions?family=event&machine=e2e-test&limit=1")
+chk "list family=event: counters present" 200 "$s" \
+  "$(jq -r 'if (.total|type)=="number" and (.has_more|type)=="boolean" and (.limit==1)
+      and ([.submissions[].family]|unique)==["event"] then 1 else 0 end' "$BODY")"
+
+# 36 before_id paging over this run's machine
+s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions?machine=e2e-test&limit=1")
+first=$(jq -r '.submissions[0].id' "$BODY")
+nb=$(jq -r '.next_before_id' "$BODY")
+ok1=$(jq -r 'if .has_more==true and .next_before_id!=null and .next_before_id==.submissions[-1].id then 1 else 0 end' "$BODY")
+s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions?machine=e2e-test&limit=1&before_id=$nb")
+ok2=$(jq -r --argjson first "$first" 'if (.submissions[0].id < $first) then 1 else 0 end' "$BODY")
+chk "before_id paging walks older rows" 200 "$s" "$((ok1 * ok2))"
+
+# 37 offset and before_id are mutually exclusive
+chk "offset+before_id -> 400" 400 "$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions?offset=1&before_id=$nb")"
+
+# 38 include=payload returns full records
+s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions?machine=e2e-test&include=payload&limit=5")
+chk "include=payload returns payloads" 200 "$s" \
+  "$(jq -r 'if ([.submissions[]|has("payload")]|all) then 1 else 0 end' "$BODY")"
+
+# 39 processed with a resolution -> updated, resolution echoed and stored
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "{\"ids\":[$fid2],\"resolution\":\"fixed in agent-feedback@e2e\"}" $BASE/api/v1/submissions/processed)
+chk "mark with resolution -> updated" 200 "$s" \
+  "$(jq -r --argjson fid2 "$fid2" 'if (.updated|index($fid2))!=null and .resolution=="fixed in agent-feedback@e2e" then 1 else 0 end' "$BODY")"
+s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions/$fid2")
+stamp=$(jq -r .processed_at "$BODY")
+chk "resolution stored on the record" 200 "$s" \
+  "$(jq -r 'if .resolution=="fixed in agent-feedback@e2e" and .processed_at!=null then 1 else 0 end' "$BODY")"
+
+# 40 same resolution again -> unchanged
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "{\"ids\":[$fid2],\"resolution\":\"fixed in agent-feedback@e2e\"}" $BASE/api/v1/submissions/processed)
+chk "same resolution -> unchanged" 200 "$s" \
+  "$(jq -r --argjson fid2 "$fid2" 'if (.unchanged|index($fid2))!=null and (.updated|length)==0 then 1 else 0 end' "$BODY")"
+
+# 41 different resolution -> updated, processed_at preserved
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "{\"ids\":[$fid2],\"resolution\":\"duplicate of $fid\"}" $BASE/api/v1/submissions/processed)
+ok1=$(jq -r --argjson fid2 "$fid2" 'if (.updated|index($fid2))!=null then 1 else 0 end' "$BODY")
+s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions/$fid2")
+ok2=$(jq -r --arg stamp "$stamp" 'if .resolution!="fixed in agent-feedback@e2e" and .processed_at==$stamp then 1 else 0 end' "$BODY")
+chk "new resolution replaces, keeps processed_at" 200 "$s" "$((ok1 * ok2))"
+
+# 42 blank resolution -> 400 ; resolution with processed=false -> 400
+chk "blank resolution -> 400" 400 "$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "{\"ids\":[$fid2],\"resolution\":\"   \"}" $BASE/api/v1/submissions/processed)"
+chk "resolution with processed=false -> 400" 400 "$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "{\"ids\":[$fid2],\"processed\":false,\"resolution\":\"x\"}" $BASE/api/v1/submissions/processed)"
+
+# 43 unmarking clears processed_at and resolution
+s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "{\"ids\":[$fid2],\"processed\":false}" $BASE/api/v1/submissions/processed)
+ok1=$(jq -r --argjson fid2 "$fid2" 'if (.updated|index($fid2))!=null then 1 else 0 end' "$BODY")
+s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions/$fid2")
+ok2=$(jq -r 'if (has("processed_at")|not) and (has("resolution")|not) then 1 else 0 end' "$BODY")
+chk "unmark clears processed_at and resolution" 200 "$s" "$((ok1 * ok2))"
+
+# 44 export: header, records, terminator whose count matches the record lines
+EXPORT=$(mktemp)
+s=$(curl -sS -o "$EXPORT" -w '%{http_code}' -H "X-Api-Key: $KEY" "$BASE/api/v1/export")
+records=$(grep -c . "$EXPORT")
+records=$((records - 2))
+ok1=$(head -n1 "$EXPORT" | jq -r 'if .export_format==1 and (has("family")) and (has("since")) then 1 else 0 end')
+ok2=$(tail -n1 "$EXPORT" | jq -r --argjson n "$records" 'if .export_complete==true and .count==$n and (.sha256|length)==64 then 1 else 0 end')
+chk "export header + terminator with count" 200 "$s" "$((ok1 * ok2))"
+
+# 45 export honours the family filter and marks itself partial
+s=$(curl -sS -o "$EXPORT" -w '%{http_code}' -H "X-Api-Key: $KEY" "$BASE/api/v1/export?family=event")
+ok1=$(head -n1 "$EXPORT" | jq -r 'if .family=="event" then 1 else 0 end')
+ok2=$(sed -n '2,$p' "$EXPORT" | sed '$d' | jq -sr 'if ([.[].family]|unique)==["event"] then 1 else 0 end')
+chk "export family filter" 200 "$s" "$((ok1 * ok2))"
+rm -f "$EXPORT"
+
+# 46 export bad filter -> 400
+chk "export bad family -> 400" 400 "$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/export?family=nope")"
+
 echo; echo "e2e: $pass passed, $fail failed"
 [ "$fail" = 0 ]

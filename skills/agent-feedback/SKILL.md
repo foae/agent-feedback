@@ -1,241 +1,199 @@
 ---
 name: agent-feedback
-description: Submit and query centralized agent telemetry — multi-model review timings/scorecards and friction reports — against the agent-feedback service (Go/Postgres). Use when submitting a friction report per the system prompt's Surface Friction directive, when querying review/friction data, or when processing submissions (list unprocessed, mark done). Review runs normally submit themselves — score-review.sh auto-submits when the last reviewer is scored.
+description: Report friction (what slowed you down) and other write-once telemetry to a self-hosted agent-feedback service, and read the queue back. Use when your instructions tell you to surface or submit friction, when you need to record a review run or a generic event, or when you need to list, inspect or mark processed submissions. Processing the queue end to end is the sibling feedback-triage skill.
 license: MIT
-compatibility: Any harness that can run bash. Requires curl + jq and AGENT_FEEDBACK_URL + AGENT_FEEDBACK_API_KEY in the environment.
+compatibility: Any harness that can run bash. Requires curl and jq, plus AGENT_FEEDBACK_URL and AGENT_FEEDBACK_API_KEY in the environment.
 metadata:
   author: foae
-  version: "2.1"
+  version: "3.0"
 ---
 
 # agent-feedback
 
-Client for the centralized telemetry service (`agent-feedback`: Go + Postgres).
-The canonical source of this skill AND the API contract is the `agent-feedback`
-repo — this skill lives there under `skills/agent-feedback/`, next to
-`docs/agent-usage.md`.
+Client for the agent-feedback service (a small Go + SQLite HTTP service; API
+contract in the service repository's `docs/api.md`). This skill is one of two:
 
-Two kinds of data live in the service:
+| Skill | Role | Who runs it |
+|---|---|---|
+| **agent-feedback** (this) | submit and read | every agent, in every harness, as part of normal work |
+| [**feedback-triage**](../feedback-triage/SKILL.md) | process the queue | one agent, on demand, when a user asks to triage |
 
-- **Review runs** — one record per `/multi-llm-review` or `/second-opinion`
-  run: per-reviewer timings, status, and the scorecard (score/valid/invalid/
-  note). Raw prompts/outputs are omitted by default.
-- **Frictions** — what slowed an agent down (see the Surface Friction
-  directive in the global system prompt), for triage into better tooling/docs.
+Three kinds of data, all write-once:
 
-An async feedback processor consumes submissions and marks them `processed`.
-As a working agent you only **report**; you never need to read before writing —
-the server absorbs duplicates itself.
+- **Frictions**: what slowed an agent down, for triage into better tooling and docs. The main path.
+- **Reviews**: one record per completed multi-reviewer run (timings, status, grades).
+- **Events**: anything else worth recording once, with a free-form JSON payload.
 
-## Installation
+You only report. You never need to read before writing; the server absorbs
+duplicates and replays itself.
+
+## Install
 
 Copy this directory (`SKILL.md` + `scripts/`) into your harness's skills
-location (e.g. `~/.claude/skills/agent-feedback/` for Claude Code, or your
-shared skills directory), then set the environment (below). Nothing to build;
-the scripts need only `bash`, `curl`, and `jq`.
-
-Fleet-wide sync/distribution of this skill is handled outside this repo.
-
-## Environment
+location, for example `~/.claude/skills/agent-feedback/`, or a shared skills
+directory that several harnesses read. Nothing to build. Then set the
+environment, typically in a shell profile every harness inherits:
 
 ```
-AGENT_FEEDBACK_API_KEY      required for every call (ask the operator)
-AGENT_FEEDBACK_URL          required for API calls — your service endpoint; no default
-AGENT_FEEDBACK_MACHINE      optional — canonical machine name; defaults to `hostname -s`.
-                            Set it where the hostname is not the canonical name.
-AGENT_FEEDBACK_HARNESS      optional — overrides harness auto-detection
-AGENT_FEEDBACK_MODEL        optional — overrides coordinator-model detection
-AGENT_FEEDBACK_SESSION_ID   optional — overrides session-id detection
+AGENT_FEEDBACK_URL        required: your service endpoint, e.g. http://192.0.2.10:8090
+AGENT_FEEDBACK_API_KEY    required: the shared key from the operator
+AGENT_FEEDBACK_MACHINE    optional: canonical machine name; defaults to `hostname -s`
+AGENT_FEEDBACK_MODEL      optional: your model id when the harness cannot tell the scripts
+AGENT_FEEDBACK_HARNESS    optional: overrides harness auto-detection
+AGENT_FEEDBACK_SESSION_ID optional: overrides session-id detection
+AGENT_FEEDBACK_REVIEW_DIRS optional: colon-separated review run-directory roots for submit-review.sh --sweep
 ```
 
-## Harness support
+Check the install: `bash scripts/submit-friction.sh --category test --summary "install check" --model <your model> --dry-run`
+prints the payload and `{"status":"valid"}` without sending anything.
 
-The scripts are harness-agnostic: any harness that can run bash can use them.
-Attribution works in two tiers:
+## Submit a friction
 
-1. **Overrides (exact)** — set `AGENT_FEEDBACK_HARNESS` / `AGENT_FEEDBACK_MODEL`
-   / `AGENT_FEEDBACK_SESSION_ID` in a harness's profile or session hook and
-   attribution is guaranteed, including for harnesses that don't exist yet.
-2. **Auto-detection (best effort)** — markers verified from each harness's own
-   code: Claude Code (`CLAUDECODE`), opencode (`OPENCODE`), pi
-   (`PI_CODING_AGENT`), omp (`PI_CODING_AGENT_DIR`/`OMP_PROFILE`), codex
-   (`CODEX_SANDBOX`). Nested launches (e.g. a review runner starting pi from a
-   Claude Code session) attribute to the **inner** harness — the one actually
-   reporting. Profile-exported API keys (`OPENCODE_API_KEY`, `CODEX_API_KEY`)
-   are ignored on purpose: they leak into every session and prove nothing.
-
-No harness exports its **model** to child processes — that's why `--model`
-should always be passed explicitly (or `AGENT_FEEDBACK_MODEL` set per profile).
-
-## Machine-readable outcomes
-
-Every submit/process command prints, as its **last stdout line**, a one-line
-JSON outcome — relay it to the user verbatim:
-
-```
-{"status":"submitted","id":36}      stored as a new record
-{"status":"duplicate","id":36}      server absorbed an identical duplicate — fine
-{"status":"spooled","reason":"..."} service unreachable; will auto-retry later
-{"status":"mismatch",...}           review replay differs from the stored record (409)
-{"status":"rejected",...}           payload bug — do NOT retry as-is
-{"status":"valid"}                  --dry-run passed
-```
-
-Exit codes are honest: 0 for submitted/duplicate/spooled/valid, 1 for
-rejected/mismatch/collision.
-
-## Scripts
-
-All paths below are relative to this skill's directory.
-
-### submit-friction.sh — file a friction report
-
-Flags mode:
-
-```bash
-bash scripts/submit-friction.sh \
-  --category documentation \
-  --summary "README's VLAN note contradicts live routing" \
-  --details "README says outbound WAN-only, but the service is reachable (verified)" \
-  --suggested-fix "correct the VLAN paragraph in the README" \
-  --model claude-fable-5
-```
-
-Stdin mode — **prefer this for prose** (no shell-quoting; a heredoc carries
-newlines, quotes, and hyphens untouched):
+Prefer stdin JSON for prose: no shell quoting, newlines and quotes survive.
 
 ```bash
 bash scripts/submit-friction.sh --stdin <<'JSON'
 {
-  "category": "tooling",
-  "summary": "functions.bash depends on missing hypa",
-  "details": "The bash tool runs hypa and exits 127, while hypa_shell works.",
-  "suggested_fix": "install hypa in the base image or fix the tool wrapper",
-  "model": "claude-fable-5"
+  "category": "documentation",
+  "summary": "README install step 3 references a flag that no longer exists",
+  "details": "README says --legacy; the CLI rejects it since v1.4 and the fix took two failed runs to find.",
+  "suggested_fix": "replace --legacy with --compat in README step 3 (applied in a1b2c3d)",
+  "model": "claude-fable-5-1"
 }
 JSON
 ```
 
-- `--category` and `--summary` are required.
-- **Always pass `--model` (or `"model"` in stdin JSON) with your own model id**
-  — you know it from your system prompt; `unknown` rows are useless for
-  analytics. `--harness`/`--project`/`--machine` are auto-detected.
-- **Context is collected for you.** Every submission carries a `context`
-  object built automatically: `occurred_at`, `cwd`, `repo_root`, `git_remote`
-  (credentials stripped), `git_branch`, `git_commit`, `git_dirty`, `os`,
-  `arch`, `session_id`, `agent`, `effort`, `client_version` — whatever is
-  available. You add nothing; an optional `"context"` object in stdin JSON
-  merges extra string pairs on top. Context never affects duplicate detection.
-- `--dry-run` builds + validates the payload and prints it without sending.
-- **Retries are safe.** The server absorbs identical-content duplicates for
-  24 h, so transport failures and 5xx are spooled and auto-retried; a manual
-  re-run after an ambiguous failure is also fine. `{"status":"duplicate"}`
-  means it was already there — success, not an error.
-- **If your suggested-fix says "applied"/"fixed", name the commit SHA** in it
-  (`git log -1 --format=%h`), or state explicitly that the change is
-  uncommitted/pending. The script warns when an applied-claim carries no SHA:
-  2 of ~20 such claims in the 2026-08-17 triage were false — one had no
-  commit anywhere, one existed only as an uncommitted working-tree change
-  that a `git pull` would have destroyed.
-
-### Fixed something? Close its queue row at fix time, not triage time
-
-When a session fixes a defect that a friction report may already cover, check
-the queue and mark the row as part of the fix — don't leave it for the next
-triage run to rediscover:
+Flags mode for one-liners:
 
 ```bash
-bash scripts/process.sh list --type friction --limit 500 | grep -i '<keyword>'
-bash scripts/process.sh done <id>    # then name the id in the fix commit body
+bash scripts/submit-friction.sh --category tooling --summary "linter hangs on empty files" --model claude-fable-5-1
 ```
 
-The 2026-08-17 triage spent a full validation batch re-verifying five fixes
-(lxcfs guard, pi MCP-hang defenses, zellij keybinds, statusline OAuth token
-renewal, OrbStack watchdog) that ordinary sessions had landed days earlier
-without touching the queue. Naming the friction id in the commit body is the
-fallback the friction-triage skill's commit cross-check reads; marking the
-row at fix time makes the whole re-discovery class disappear. (If the user's
-standing rules require approval before state changes, ask alongside the fix
-itself — one question, not a leftover row.)
+- `category` and `summary` are required. Categories are free-form; common
+  ones: `documentation`, `tooling`, `config`, `environment`.
+- **Always pass your model id** (`--model` or `"model"`); no harness exposes it
+  to child processes and `unknown` rows are useless for analysis.
+- `harness`, `project`, `machine` are auto-detected; pass them only to override.
+- **Context is collected for you**: `occurred_at`, `cwd`, `repo_root`,
+  `git_remote` (credentials stripped), `git_branch`, `git_commit`, `git_dirty`,
+  `os`, `arch`, `session_id`, `client_version`, and harness metadata when
+  available. A `"context"` object in stdin JSON adds string pairs on top.
+  Context never affects duplicate detection.
+- If `suggested_fix` says the fix was applied, name the commit; otherwise say
+  it is uncommitted or pending. The script warns when an applied claim has no
+  commit hash.
+- Retries are safe: identical content within 24 hours is absorbed by the
+  server (`{"status":"duplicate"}` is success, not an error).
+- Fixed something a queued report already covers? Close its row as part of
+  the fix (see [Process the queue](#process-the-queue)) and name the id in the
+  commit body (`friction 43`).
 
-### submit-review.sh — (re)submit a review run
+## Outcomes and exit codes
 
-External review runners can invoke this after grading or use `--sweep` to recover
-failed submissions. The runner and scoring tools are not bundled with this skill.
-Manual uses:
+Every submit and process command prints, as its **last stdout line**, one
+JSON outcome. Relay it to the user verbatim.
+
+| Outcome | Meaning | Exit |
+|---|---|---|
+| `{"status":"submitted","id":N}` | stored as a new record | 0 |
+| `{"status":"duplicate","id":N}` | server already had identical content; fine | 0 |
+| `{"status":"spooled","reason":"…"}` | service unreachable or 5xx; saved locally, retried on the next call | 0 |
+| `{"status":"valid"}` | `--dry-run` passed local validation | 0 |
+| `{"status":"mismatch",…}` | review/event replay differs from the stored record (409); submit a correction under a new key | 1 |
+| `{"status":"rejected",…}` | payload bug (4xx or local validation); do not retry as-is | 1 |
+| `{"status":"failed","reason":"spool_unwritable",…}` | could not send and could not save; the payload is printed to stderr for recovery | 1 |
+
+Spool location: `~/.cache/agent-feedback/spool/`. Frictions are retried for
+20 hours (inside the server's 24 hour dedupe window, so a retry can never
+double-file); reviews and events for 30 days (they are idempotent). Every
+script prints a one-line backlog warning on stderr while unsent payloads
+exist; surface it, it is the only signal the service is down. The scripts
+never print the API key, and send it via a mode-0600 header file, not argv.
+
+## Process the queue
+
+Used by the feedback-triage skill and by any session closing a row it fixed.
 
 ```bash
-# Resubmit a specific run (idempotent — identical replay returns the record):
-bash scripts/submit-review.sh ~/.cache/multi-llm-review/<run_ts>-<pid>
-
-# Include the full prompt + raw reviewer outputs (off by default):
-bash scripts/submit-review.sh <run_dir> --include-outputs
-
-# Recovery pass (spool flush + fully-scored-but-unsubmitted runs):
-bash scripts/submit-review.sh --sweep
-```
-
-A `{"status":"mismatch"}` (HTTP 409) outcome means this run dir's content
-differs from what the service already stored under that run_id — the server
-never overwrites. Surface it; a correction must be a new submission.
-`--include-outputs` after a default auto-submit will 409 for exactly this
-reason: the enriched payload differs from the stored one.
-
-Run dirs without `meta.json` predate the integration and are skipped. Both direct
-submission and sweep require a grade for every completed reviewer; blank optional
-finding counts remain absent. Runs sharing a timestamp are refused because the
-external timestamp-keyed ledger cannot disambiguate their grades. Resolve the
-ledger at its source rather than borrowing sibling scores. Attribution always
-comes from the run's `meta.json.caller`, including delayed direct submissions.
-
-Legacy server rows without payload hashes return the stored record on replay
-without comparing content. Use a new run ID for corrections. Scores are external
-coordinator judgments, not independently verified benchmarks.
-
-### process.sh — the feedback processor's tooling
-
-```bash
-# What's waiting? (unprocessed submissions, compact TSV: id/type/machine/category/summary)
-bash scripts/process.sh list
-bash scripts/process.sh list --type friction --json
-
-# Acted on them → mark processed (batch, idempotent):
-bash scripts/process.sh done 43 44 45
-# → {"processed":true,"updated":[43,44,45],"unchanged":[],"not_found":[]}
-
-# Marked the wrong one:
+bash scripts/process.sh list                          # every unprocessed row, all pages; TSV: id family type machine category summary
+bash scripts/process.sh list --family friction --json # merged JSON {"submissions":[…],"total":N}
+bash scripts/process.sh list --include-processed --limit 200
+bash scripts/process.sh done 43 44 --resolution "fixed in example@a1b2c3d"
+bash scripts/process.sh done 42 --resolution "invalid: flag exists since v1.4"
 bash scripts/process.sh undo 44
 ```
 
-### query.sh — read data back
+`done` and `undo` print the server's classification verbatim:
+`{"processed":true,"resolution":"…","updated":[43],"unchanged":[44],"not_found":[]}`.
+An unexpected `unchanged` means the row was already in that state. One
+`done` per distinct resolution.
+
+## Read data back
 
 ```bash
-bash scripts/query.sh --type multi-llm-review --limit 20
-bash scripts/query.sh --type friction --processed false
+bash scripts/query.sh --family friction --processed false --include-payload
+bash scripts/query.sh --type deploy --since 2026-09-01T00:00:00Z --limit 20
 bash scripts/query.sh 43 | jq .payload
+bash scripts/query.sh export --family friction > frictions.jsonl   # verifies the export terminator
 ```
 
-Raw JSON out. List rows include friction `category`/`summary`/`project`/
-`harness` and `processed_at`; fetch by id for the full payload. All values are
-URL-encoded properly (`+02:00` offsets are safe). Read-only — pass `--flush`
-to also flush the write spool.
+Raw JSON out. List rows are summaries (frictions carry `category`, `summary`,
+`project`, `harness`); pass `--include-payload` or fetch by id for payloads.
+`--before-id N` continues a page. Read-only unless `--flush` is given.
 
-## Failure behavior (all scripts)
+## Submit an event
 
-- Service unreachable → payloads spool to `~/.cache/agent-feedback/spool/` and
-  auto-retry on the next submit/flush call. Reviews retry for up to 30 d;
-  frictions for up to 20 h (inside the server's 24 h dedupe window — past it,
-  the spooled friction is dropped with a loud warning naming its summary:
-  re-file it if still relevant).
-- Every script prints a spool-backlog warning (stderr) when unsent payloads
-  exist — surface that line to the user, it is the only signal the service is
-  down.
-- `{"status":"rejected"}` (4xx) → the server names the offending field; a
-  payload/contract bug to report, not a retry case.
-- The scripts never print the API key.
-- Authentication headers use an owner-only temporary file, not curl arguments.
-- Invalid successful friction receipts are retained for retry, not acknowledged.
-- Rejected spool files emit backlog warnings and expire after 30 days.
-- Automatically collected remote URLs remove userinfo, query strings, fragments
-  and SCP usernames. Explicit context and report prose remain your responsibility;
-  preview them and never include secrets.
+```bash
+bash scripts/submit-event.sh --kind deploy --key "$(hostname -s)-$(date -u +%Y%m%d-%H%M%S)" --model claude-fable-5-1 --stdin <<'JSON'
+{"service":"agent-feedback","image":"sha-0e840b2","ok":true}
+JSON
+```
+
+`kind` namespaces the key; `friction` is reserved. Replaying the same
+`(kind, key)` with identical payload returns `duplicate`; a different payload
+returns `mismatch`. Omit `--key` for a generated `<machine>-<timestamp>-<pid>`.
+
+## Submit a review run
+
+For review runners that keep one directory per run. Runners call this at the
+end of grading; humans call it to retry.
+
+```bash
+bash scripts/submit-review.sh <run_dir>                    # timings + grades; identical replay → duplicate
+bash scripts/submit-review.sh <run_dir> --include-outputs  # also prompt and raw reviewer outputs
+bash scripts/submit-review.sh --sweep                      # flush the spool, submit fully graded runs without a .submitted marker
+```
+
+`--sweep` scans `REVIEW_LOG_DIR` and every directory in
+`AGENT_FEEDBACK_REVIEW_DIRS`. Runs sharing a timestamp are refused because a
+timestamp-keyed ledger cannot tell their grades apart; fix the ledger, then
+retry. `--include-outputs` after a default submission returns `mismatch`: the
+enriched payload differs from the stored one, and the server never
+overwrites.
+
+### Run-directory contract
+
+`<root>/<run_ts>-<pid>/` containing:
+
+- `meta.json`: `machine`, `skill`, `run_ts`, `caller` (coordinator model at
+  run time), and a `slots` map of slot → `{model, label}`.
+- `summary.tsv`: header, then one row per reviewer: `slot model status duration_s bytes`
+  (`duration_s`/`bytes` may be empty).
+- `<slot>.md`: raw reviewer output (sent only with `--include-outputs`).
+- `prompt.md`: the review prompt (sent only with `--include-outputs`).
+- `../scorecards.tsv` beside the run directories: grading ledger keyed by
+  `run_ts` and reviewer **label**, columns `run_ts label score valid invalid note`;
+  `PENDING` rows mean not yet graded.
+
+Every completed reviewer must have a grade before submission. `run_id` is
+`<machine>-<run_ts>-<pid>`. A `.submitted` file holding the record id is
+written into the run directory after a validated receipt.
+
+## Failure behaviour, in one place
+
+- 000 / 5xx → spool, outcome `spooled`, exit 0.
+- 4xx → outcome `rejected` with the server's message (it names the field), exit 1.
+- 409 → outcome `mismatch`, exit 1; stored record untouched.
+- 2xx with a malformed body → treated as not delivered: spooled for retry.
+- Spool directory unwritable → outcome `failed`, payload on stderr, exit 1.
+- Rejected spool files (`*.rejected`) are kept 30 days for inspection.

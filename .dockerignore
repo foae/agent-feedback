@@ -1,0 +1,14 @@
+.git/
+.github/
+.private/
+bin/
+docs/
+infra/
+scripts/
+skills/
+tests/
+.env
+**/.env
+*.db
+*.db-wal
+*.db-shm

@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Deploy a GHCR image over explicitly configured SSH without registry
-# credentials on the target.
-# Usage: scripts/deploy.sh [image-tag]
-# Required: DEPLOY_REMOTE (SSH destination), DEPLOY_IMAGE (GHCR repo, no tag).
-# Optional local settings: .private/deploy.env.
-# crane avoids incomplete docker-save archives with containerd image stores.
+# Deploy a published image to a host over SSH with docker compose.
+#
+# Usage: scripts/deploy.sh <commit-sha-or-tag>
+# Required: DEPLOY_REMOTE   SSH destination (user@host)
+# Optional: DEPLOY_IMAGE    image repository, default ghcr.io/foae/agent-feedback
+#           DEPLOY_DIR      remote directory, default ~/agent-feedback
+# Both may live in the gitignored .private/deploy.env.
+#
+# Steps: install the compose file, create/preserve the remote .env (API_KEY is
+# generated once and never printed), pin FEEDBACK_IMAGE to the requested tag in
+# that .env, `docker compose pull && up -d --wait`, then check /ready.
+# The host must be able to pull the image (public package or logged in).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,59 +18,37 @@ if [ -f "$ROOT/.private/deploy.env" ]; then
   # shellcheck source=/dev/null
   source "$ROOT/.private/deploy.env"
 fi
-: "${DEPLOY_REMOTE:?Set DEPLOY_REMOTE to your SSH destination}"
-: "${DEPLOY_IMAGE:?Set DEPLOY_IMAGE to your GHCR image repository without a tag}"
-TAG=${1:-latest}
-[[ "$DEPLOY_IMAGE" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]] || { echo "Invalid DEPLOY_IMAGE" >&2; exit 1; }
-[[ "$TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || { echo "Invalid image tag" >&2; exit 1; }
-IMAGE="${DEPLOY_IMAGE}:${TAG}"
+: "${DEPLOY_REMOTE:?Set DEPLOY_REMOTE to the SSH destination (user@host)}"
+DEPLOY_IMAGE="${DEPLOY_IMAGE:-ghcr.io/foae/agent-feedback}"
+DEPLOY_DIR="${DEPLOY_DIR:-agent-feedback}"
+TAG="${1:?usage: scripts/deploy.sh <commit-sha-or-tag>}"
 
-command -v crane >/dev/null || { echo "crane is required: brew install crane"; exit 1; }
-umask 077
-AUTH_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-feedback-crane-auth-XXXXXX")
-IMG_TAR=$(mktemp /tmp/agent-feedback-image-XXXXXX.tar)
-cleanup() {
-  rm -rf -- "$AUTH_DIR"
-  rm -f -- "$IMG_TAR"
-}
-trap cleanup EXIT
-export DOCKER_CONFIG="$AUTH_DIR"
+[[ "$DEPLOY_IMAGE" =~ ^[a-z0-9.-]+(/[a-z0-9._-]+)+$ ]] || { echo "invalid DEPLOY_IMAGE: $DEPLOY_IMAGE" >&2; exit 1; }
+[[ "$TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || { echo "invalid tag: $TAG" >&2; exit 1; }
+[ "$TAG" != latest ] || echo "warning: deploying 'latest' — prefer a commit SHA; latest can move backwards" >&2
+IMAGE="$DEPLOY_IMAGE:$TAG"
 
-echo "==> Logging into GHCR locally with temporary crane credentials"
-gh auth token | crane auth login ghcr.io -u "$(gh api user -q .login)" --password-stdin
-echo "==> Fetching ${IMAGE} from GHCR"
-crane pull "${IMAGE}" "${IMG_TAR}"
-echo "==> Streaming image to ${DEPLOY_REMOTE}"
-ssh -- "${DEPLOY_REMOTE}" docker load < "${IMG_TAR}"
+echo "==> Installing compose file to $DEPLOY_REMOTE:$DEPLOY_DIR"
+ssh -- "$DEPLOY_REMOTE" "mkdir -p '$DEPLOY_DIR'"
+scp -q -- "$ROOT/infra/agent-feedback/docker-compose.deploy.yml" "$DEPLOY_REMOTE:$DEPLOY_DIR/docker-compose.yml"
 
-echo "==> Syncing compose file"
-ssh -- "${DEPLOY_REMOTE}" 'mkdir -p agent-feedback'
-scp -q -- "$ROOT/infra/agent-feedback/docker-compose.deploy.yml" \
-  "${DEPLOY_REMOTE}:agent-feedback/docker-compose.yml"
-
-echo "==> Ensuring .env (generated on first deploy, preserved afterwards)"
-ssh -- "${DEPLOY_REMOTE}" bash -s <<'REMOTE_ENV'
+echo "==> Ensuring .env (API_KEY generated on first deploy, preserved afterwards; image pinned to $IMAGE)"
+ssh -- "$DEPLOY_REMOTE" DEPLOY_DIR="$DEPLOY_DIR" IMAGE="$IMAGE" bash -s <<'REMOTE'
 set -euo pipefail
-cd "$HOME/agent-feedback"
+cd "$DEPLOY_DIR"
+umask 077
 if [ ! -f .env ]; then
-  umask 077
-  API_KEY=$(openssl rand -hex 32)
-  PW=$(openssl rand -hex 16)
-  printf 'API_KEY=%s\nPOSTGRES_PASSWORD=%s\nPOSTGRES_URL=postgres://feedback:%s@postgres:5432/feedback?sslmode=disable\n' \
-    "$API_KEY" "$PW" "$PW" > .env
-  echo "    generated .env — credentials remain on the remote host"
-else
-  echo "    .env exists — preserved"
+  printf 'API_KEY=%s\n' "$(openssl rand -hex 32)" > .env
+  echo "    generated .env"
 fi
-REMOTE_ENV
+grep -q '^API_KEY=.\+' .env || { echo "    .env has no API_KEY; refusing" >&2; exit 1; }
+grep -v '^FEEDBACK_IMAGE=' .env > .env.next || true
+printf 'FEEDBACK_IMAGE=%s\n' "$IMAGE" >> .env.next
+mv .env.next .env
+docker compose pull --quiet
+docker compose up -d --wait --remove-orphans
+REMOTE
 
-echo "==> Starting stack (tag: ${TAG})"
-ssh -- "${DEPLOY_REMOTE}" "cd agent-feedback && FEEDBACK_IMAGE=${IMAGE} docker compose up -d --remove-orphans"
-echo "==> Readiness check (includes Postgres)"
-ssh -- "${DEPLOY_REMOTE}" 'for i in $(seq 1 30); do
-  curl -sf http://127.0.0.1:8090/ready >/dev/null && { echo "    ready"; exit 0; }
-  sleep 1
-done
-echo "    readiness check FAILED — inspect docker compose logs in ~/agent-feedback on the target"
-exit 1'
-echo "==> Deployed ${IMAGE} to ${DEPLOY_REMOTE} (HTTP port 8090)"
+echo "==> Readiness"
+ssh -- "$DEPLOY_REMOTE" 'curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 5 http://127.0.0.1:8090/ready' \
+  && echo && echo "==> Deployed $IMAGE"

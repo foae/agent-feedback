@@ -7,16 +7,20 @@
 #   submit-review.sh <run_dir> [--include-outputs]
 #   submit-review.sh --sweep
 #
-# <run_dir> is a runner run dir (~/.cache/<skill>/<run_ts>-<pid>/) holding
-# meta.json (written by review-runner.sh), summary.tsv, and — beside it in the
-# cache base — scorecards.tsv. Dirs without meta.json predate this integration
-# and are skipped.
+# <run_dir> is a runner run dir (<base>/<run_ts>-<pid>/) holding meta.json
+# (written by the review runner), summary.tsv, and — beside it in the cache
+# base — scorecards.tsv. Dirs without meta.json predate this integration and
+# are skipped.
 #
-# Called automatically by _lib/score-review.sh when a run's last PENDING row is
-# filled, and by review-runner.sh at end-of-run as `--sweep`. Safe to call by
+# Called automatically by the runner's scoring hook when a run's last PENDING
+# row is filled, and by the runner at end-of-run as `--sweep`. Safe to call by
 # hand: POST /api/v1/reviews is idempotent on (skill, run_id) — an identical
 # replay returns the existing record (200); changed content under the same
 # run_id is refused with 409 (the stored record is never silently replaced).
+#
+# Run-dir bases swept by --sweep (no defaults; nothing is swept unless set):
+#   REVIEW_LOG_DIR               the runner's own base, when exported
+#   AGENT_FEEDBACK_REVIEW_DIRS   colon-separated list of additional bases
 #
 # The last stdout line per submission is a machine-readable outcome:
 #   {"status":"submitted","id":N,"run_id":"..."}
@@ -75,8 +79,11 @@ scorecard_timestamp_ambiguous() {
 # ── Payload construction ─────────────────────────────────────────────────────
 
 # build_payload <run_dir> <include_outputs 0|1> <mode direct|sweep> → payload file path
+# Reviewer outputs and the prompt can be megabytes; they are never passed
+# through jq's argv (--arg is capped by the OS argument limit) and never
+# accumulated in a shell variable. Everything large moves via files.
 build_payload() {
-  local run_dir="$1" include_outputs="$2" mode="$3"
+  local run_dir="$1" include_outputs="$2"
   local meta="$run_dir/meta.json"
   [ -f "$meta" ] || { af_warn "no meta.json in $run_dir (predates integration) — skipping"; return 1; }
   [ -s "$run_dir/summary.tsv" ] || { af_warn "no summary.tsv in $run_dir — skipping"; return 1; }
@@ -90,19 +97,23 @@ build_payload() {
   # Attribution belongs to the run, not the later shell that retries it.
   coordinator=$(jq -r '.caller // "unknown"' "$meta")
 
+  local work
+  work=$(mktemp -d) || { af_warn "could not create a temporary directory"; return 1; }
+
   # Scorecards are timestamp-keyed by the external runner. Refuse to borrow
   # rows when sibling run directories share a timestamp; their score rows
   # cannot be assigned safely without changing that external protocol.
-  local ledger score_rows_json scores_json
+  local ledger
   ledger="$(dirname "$run_dir")/scorecards.tsv"
   if [ -f "$ledger" ] && scorecard_timestamp_ambiguous "$run_dir" "$run_ts"; then
     af_warn "multiple run directories share scorecard timestamp $run_ts — NOT submitting ambiguous run $run_id"
-    return 1
+    rm -rf "$work"; return 1
   fi
 
-  score_rows_json="[]"
+  local rows_f="$work/score-rows.json" scores_f="$work/scores.json"
+  printf '[]' >"$rows_f"
   if [ -f "$ledger" ]; then
-    if ! score_rows_json=$(awk -F'\t' -v ts="$run_ts" '$1 == ts { print $0 }' "$ledger" \
+    if ! awk -F'\t' -v ts="$run_ts" '$1 == ts { print $0 }' "$ledger" \
       | jq -Rsc '
           def optional_number:
             if . == null or . == "" then null else try tonumber catch null end;
@@ -115,71 +126,80 @@ build_payload() {
                            then null else try ($score | tonumber) catch null end),
                    valid: (.valid_text | optional_number),
                    invalid: (.invalid_text | optional_number),
-                   note: (.note // "")})'); then
+                   note: (.note // "")})' >"$rows_f"; then
       af_warn "could not parse scorecard ledger for $run_id — NOT submitting"
-      return 1
+      rm -rf "$work"; return 1
     fi
   fi
-  scores_json=$(jq -c 'map(select(.score != null))' <<<"$score_rows_json")
+  jq -c 'map(select(.score != null))' "$rows_f" >"$scores_f"
 
   # Reviewers from summary.tsv (slot, model, status, duration_s, bytes).
-  local reviewers_json="[]" slot model status dur bytes out_file output_arg
+  local slot model status dur bytes out_file want_output i=0
+  local empty="$work/empty"; : >"$empty"
+  local revdir="$work/reviewers"; mkdir -p "$revdir"
   while IFS=$'\t' read -r slot model status dur bytes; do
     [ -n "$slot" ] || continue
-    output_arg=null
-    if [ "$include_outputs" = 1 ]; then
+    want_output=0
+    out_file="$empty"
+    if [ "$include_outputs" = 1 ] && [ -s "$run_dir/$slot.md" ]; then
       out_file="$run_dir/$slot.md"
-      [ -s "$out_file" ] && output_arg=$(jq -Rs . <"$out_file")
+      want_output=1
     fi
-    reviewers_json=$(jq -n \
-      --argjson acc "$reviewers_json" \
+    i=$((i + 1))
+    jq -cn \
       --arg slot "$slot" --arg model "$model" --arg status "$status" \
-      --arg dur "$dur" --arg bytes "$bytes" --argjson output "$output_arg" \
-      --argjson scores "$scores_json" \
+      --arg dur "$dur" --arg bytes "$bytes" \
+      --rawfile output "$out_file" --argjson want_output "$want_output" \
+      --slurpfile scores "$scores_f" \
       --slurpfile meta "$meta" \
       '($meta[0].slots[$slot].label // "") as $label
-       | ($scores | map(select($label != "" and .label == $label)) | first) as $sc
-       | $acc + [
-           {slot: $slot, model: $model, status: $status}
-           + (if $dur   != "" then {duration_s: ($dur | tonumber)} else {} end)
-           + (if $bytes != "" then {bytes: ($bytes | tonumber)} else {} end)
-           + (if $output != null then {output: $output} else {} end)
-           + (if $sc != null then
-                ({}
-                 + (if $sc.score   != null then {score: $sc.score} else {} end)
-                 + (if $sc.valid   != null then {valid: $sc.valid} else {} end)
-                 + (if $sc.invalid != null then {invalid: $sc.invalid} else {} end)
-                 + (if ($sc.note // "") != "" then {note: $sc.note} else {} end))
-              else {} end)
-         ]')
+       | ($scores[0] | map(select($label != "" and .label == $label)) | first) as $sc
+       | {slot: $slot, model: $model, status: $status}
+         + (if $dur   != "" then {duration_s: ($dur | tonumber)} else {} end)
+         + (if $bytes != "" then {bytes: ($bytes | tonumber)} else {} end)
+         + (if $want_output == 1 and $output != "" then {output: $output} else {} end)
+         + (if $sc != null then
+              ({}
+               + (if $sc.score   != null then {score: $sc.score} else {} end)
+               + (if $sc.valid   != null then {valid: $sc.valid} else {} end)
+               + (if $sc.invalid != null then {invalid: $sc.invalid} else {} end)
+               + (if ($sc.note // "") != "" then {note: $sc.note} else {} end))
+            else {} end)' >"$revdir/$(printf '%05d' "$i").json"
   done < <(tail -n +2 "$run_dir/summary.tsv")
 
-  [ "$(jq 'length' <<<"$reviewers_json")" -gt 0 ] \
-    || { af_warn "no reviewer rows in $run_dir/summary.tsv — nothing to submit"; return 1; }
+  local reviewers_f="$work/reviewers.json"
+  if [ "$i" -eq 0 ]; then
+    af_warn "no reviewer rows in $run_dir/summary.tsv — nothing to submit"
+    rm -rf "$work"; return 1
+  fi
+  jq -sc '.' "$revdir"/*.json >"$reviewers_f"
 
   # A completed reviewer must have exactly one numeric grade. Never claim the
   # write-once run_id before the scorecard is complete enough to be trustworthy.
   local incomplete
   incomplete=$(jq -nr \
-    --argjson reviewers "$reviewers_json" --argjson rows "$score_rows_json" \
+    --slurpfile reviewers "$reviewers_f" --slurpfile rows "$rows_f" \
     --slurpfile meta "$meta" '
       [
-        $reviewers[]
+        $reviewers[0][]
         | select(.status == "completed")
         | .slot as $slot
         | ($meta[0].slots[$slot].label // "") as $label
-        | ($rows | map(select(.label == $label))) as $grades
+        | ($rows[0] | map(select(.label == $label))) as $grades
         | select($label == "" or ($grades | length) != 1 or ($grades[0].score == null))
         | if $label == "" then "\($slot) (no scorecard label)"
           else "\($slot) (\($label))" end
       ]
       | join(", ")')
-  [ -z "$incomplete" ] \
-    || { af_warn "incomplete scorecard for completed reviewer(s) in $run_id: $incomplete — NOT submitting"; return 1; }
+  if [ -n "$incomplete" ]; then
+    af_warn "incomplete scorecard for completed reviewer(s) in $run_id: $incomplete — NOT submitting"
+    rm -rf "$work"; return 1
+  fi
 
-  local prompt_arg=null
+  local prompt_file="$empty" want_prompt=0
   if [ "$include_outputs" = 1 ] && [ -s "$run_dir/prompt.md" ]; then
-    prompt_arg=$(jq -Rs . <"$run_dir/prompt.md")
+    prompt_file="$run_dir/prompt.md"
+    want_prompt=1
   fi
 
   local payload
@@ -187,10 +207,12 @@ build_payload() {
   jq -n \
     --arg skill "$skill" --arg machine "$machine" \
     --arg coordinator "$coordinator" --arg run_id "$run_id" \
-    --argjson prompt "$prompt_arg" --argjson reviewers "$reviewers_json" \
+    --rawfile prompt "$prompt_file" --argjson want_prompt "$want_prompt" \
+    --slurpfile reviewers "$reviewers_f" \
     '{skill: $skill, machine_name: $machine, coordinator_model: $coordinator,
-      run_id: $run_id, reviewers: $reviewers}
-     + (if $prompt != null then {prompt: $prompt} else {} end)' >"$payload"
+      run_id: $run_id, reviewers: $reviewers[0]}
+     + (if $want_prompt == 1 and $prompt != "" then {prompt: $prompt} else {} end)' >"$payload"
+  rm -rf "$work"
   printf '%s\n' "$payload"
 }
 
@@ -200,7 +222,7 @@ build_payload() {
 submit_run() {
   local run_dir="$1" include_outputs="$2" mode="$3"
   local payload run_id rc=0
-  payload=$(build_payload "$run_dir" "$include_outputs" "$mode") || {
+  payload=$(build_payload "$run_dir" "$include_outputs") || {
     [ "$mode" = sweep ] && return 0
     return 1
   }
@@ -208,19 +230,28 @@ submit_run() {
 
   af_request POST "/api/v1/reviews" "$payload"
   case "$AF_HTTP_CODE" in
-    201)
-      jq -r '.id' "$AF_RESP" >"$run_dir/.submitted"
-      af_outcome "$(jq -c --arg run_id "$run_id" '{status:"submitted",id:.id,run_id:$run_id}' "$AF_RESP")"
-      ;;
-    200)
-      # Identical replay — trust it only if it is OUR record.
-      if [ "$(jq -r '.run_id + "|" + .machine_name' "$AF_RESP")" = "$run_id|$(jq -r '.machine_name' "$payload")" ]; then
+    201|200)
+      # A 2xx is only a receipt for OUR run when the returned record proves it:
+      # positive integer id, our family/skill, our run_id and machine. The
+      # .submitted marker suppresses every later retry, so it is written only
+      # after that check passes.
+      if af_review_response_valid "$AF_RESP" "$payload"; then
         jq -r '.id' "$AF_RESP" >"$run_dir/.submitted"
-        af_outcome "$(jq -c --arg run_id "$run_id" '{status:"duplicate",id:.id,run_id:$run_id}' "$AF_RESP")"
-      else
+        if [ "$AF_HTTP_CODE" = 201 ]; then
+          af_outcome "$(jq -c --arg run_id "$run_id" '{status:"submitted",id:.id,run_id:$run_id}' "$AF_RESP")"
+        else
+          af_outcome "$(jq -c --arg run_id "$run_id" '{status:"duplicate",id:.id,run_id:$run_id}' "$AF_RESP")"
+        fi
+      elif ! af_review_identity_ok "$AF_RESP" "$payload"; then
         af_warn "run_id collision: server returned a different record for $run_id — NOT marking submitted"
         af_outcome "$(jq -cn --arg run_id "$run_id" '{status:"collision",run_id:$run_id}')"
         rc=1
+      else
+        # Right run, unusable receipt (no/!integer id, wrong family). Reviews
+        # are idempotent, so retrying is safe and losing the run is not.
+        af_warn "malformed review success response for $run_id — spooling for retry"
+        af_spool "review-$run_id" "$payload"
+        af_outcome "$(jq -cn --arg run_id "$run_id" '{status:"spooled",run_id:$run_id,reason:"malformed_success_response"}')"
       fi
       ;;
     000)
@@ -314,6 +345,21 @@ sweep_lock_acquire() {
   return 0
 }
 
+# sweep_bases — the configured run-dir bases, one per line. No defaults: a
+# machine that does not say where its run dirs live has none to sweep.
+sweep_bases() {
+  local dir
+  local -a parts=()
+  [ -z "${REVIEW_LOG_DIR:-}" ] || printf '%s\n' "$REVIEW_LOG_DIR"
+  if [ -n "${AGENT_FEEDBACK_REVIEW_DIRS:-}" ]; then
+    IFS=':' read -ra parts <<<"$AGENT_FEEDBACK_REVIEW_DIRS"
+    for dir in "${parts[@]}"; do
+      if [ -n "$dir" ]; then printf '%s\n' "$dir"; fi
+    done
+  fi
+  return 0
+}
+
 sweep() {
   mkdir -p "$AF_CACHE"
   sweep_lock_acquire || return 0   # another live/fresh sweep is redundant
@@ -321,12 +367,19 @@ sweep() {
 
   af_flush_spool
 
+  local bases
+  bases=$(sweep_bases)
+  if [ -z "$bases" ]; then
+    af_warn "no review run directories configured (set AGENT_FEEDBACK_REVIEW_DIRS)"
+    return 0
+  fi
+
   local cutoff
   cutoff=$(date -d "$SWEEP_MIN_AGE_HOURS hours ago" +%Y%m%d-%H%M%S 2>/dev/null \
     || date -v-"${SWEEP_MIN_AGE_HOURS}"H +%Y%m%d-%H%M%S 2>/dev/null || echo "")
 
   local base run_dir run_ts
-  for base in "${REVIEW_LOG_DIR:-$HOME/.cache/multi-llm-review}" "$HOME/.cache/second-opinion"; do
+  while IFS= read -r base; do
     [ -d "$base" ] || continue
     for run_dir in "$base"/*/; do
       run_dir="${run_dir%/}"
@@ -337,7 +390,7 @@ sweep() {
       [ -n "$cutoff" ] && [ "$run_ts" \> "$cutoff" ] && continue
       submit_run "$run_dir" 0 sweep || true   # sweep is best-effort; outcomes are printed per run
     done
-  done
+  done <<<"$bases"
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────────

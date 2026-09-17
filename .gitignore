@@ -31,13 +31,16 @@ go.work.sum
 __pycache__/
 
 
-backend/vendor
 # Editor/IDE
 # .idea/
 # .vscode/
 
-# Local build output (just build)
-backend/bin/
+# Local build output (just build) and the local run-local database
+bin/
+local/
+*.db
+*.db-wal
+*.db-shm
 
 # Private deployment settings and pre-publication recovery data
 /.private/
