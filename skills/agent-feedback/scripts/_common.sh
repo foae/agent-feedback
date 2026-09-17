@@ -44,11 +44,34 @@ AF_MAX_SUMMARY_BYTES=2000
 AF_MAX_CONTEXT_ENTRIES=32
 AF_MAX_CONTEXT_KEY_BYTES=64
 AF_MAX_CONTEXT_VALUE_BYTES=2000
+# Used by the submit scripts (shellcheck cannot see across the source).
+# shellcheck disable=SC2034
+AF_MAX_BODY_BYTES=10485760   # 10 MiB — the server's request-body cap (413)
 
 af_machine() { printf '%s' "${AGENT_FEEDBACK_MACHINE:-$(hostname -s)}"; }
 
-af_die() { echo "agent-feedback: $*" >&2; exit 1; }
 af_warn() { echo "agent-feedback: $*" >&2; }
+
+# af_json_string <text> — JSON string literal without jq (af_die must still
+# produce a machine-readable outcome when jq itself is what is missing).
+af_json_string() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -Rn --arg s "$1" '$s'
+  else
+    printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  fi
+}
+
+# af_error <message> — configuration/transport/HTTP failure. Every command ends
+# with exactly one machine-readable outcome line, including its failure paths.
+af_error() {
+  af_warn "$1"
+  af_outcome "{\"status\":\"error\",\"message\":$(af_json_string "$1")}"
+  exit 1
+}
+
+# af_die — kept as the historical name for af_error.
+af_die() { af_error "$*"; }
 
 # Machine-readable outcome: ALWAYS the last stdout line of a submit/process
 # call. Agents relay it verbatim. Statuses: submitted, duplicate, spooled,
@@ -84,8 +107,10 @@ af_trim() {
 
 af_bytelen() { LC_ALL=C printf '%s' "$1" | wc -c | tr -d ' '; }
 
-# af_reject <message> — emit the rejection outcome and exit 1.
+# af_reject <message> — local validation failure: human line on stderr, one
+# machine-readable outcome on stdout, exit 1.
 af_reject() {
+  af_warn "$1"
   af_outcome "$(jq -cn --arg m "$1" '{status:"rejected",message:$m}')"
   exit 1
 }
@@ -146,11 +171,15 @@ af_auth_header_file() {
 # A 2xx alone never proves the server stored OUR submission. Every success path
 # checks the returned record against the payload that was sent.
 
-# af_friction_response_valid <response-file>
+# af_friction_response_valid <response-file> <payload-file> — family AND
+# submission_type must both say "friction", the id must be a positive integer,
+# and the record must carry the machine name that was sent.
 af_friction_response_valid() {
-  jq -e '(.id? | select(type == "number")) as $id
+  jq -e --slurpfile p "$2" '(.id? | select(type == "number")) as $id
          | ($id > 0 and $id == ($id | floor))
-           and ((.family? == "friction") or (.submission_type == "friction"))' "$1" >/dev/null 2>&1
+           and (.family == "friction")
+           and (.submission_type == "friction")
+           and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
 }
 
 # af_review_identity_ok <response-file> <payload-file> — same run_id + machine.
@@ -159,11 +188,21 @@ af_review_identity_ok() {
     '(.run_id == $p[0].run_id) and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
 }
 
+# af_identity_comparable <response-file> — the body parses, is an object, has an
+# id and carries both identity fields. Only then can a difference be called a
+# collision; anything else is a malformed success (retryable), never a claim
+# that the server stored someone else's record.
+af_identity_comparable() {
+  jq -e 'type == "object" and (.id != null)
+         and (.run_id != null) and (.machine_name != null)' "$1" >/dev/null 2>&1
+}
+
 # af_review_response_valid <response-file> <payload-file>
 af_review_response_valid() {
   jq -e --slurpfile p "$2" '(.id? | select(type == "number")) as $id
          | ($id > 0 and $id == ($id | floor))
-           and ((.family? == "review") or (.submission_type == $p[0].skill))
+           and (.family == "review")
+           and (.submission_type == $p[0].skill)
            and (.run_id == $p[0].run_id)
            and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
 }
@@ -178,7 +217,8 @@ af_event_identity_ok() {
 af_event_response_valid() {
   jq -e --slurpfile p "$2" '(.id? | select(type == "number")) as $id
          | ($id > 0 and $id == ($id | floor))
-           and ((.family? == "event") or (.submission_type == $p[0].kind))
+           and (.family == "event")
+           and (.submission_type == $p[0].kind)
            and (.run_id == $p[0].key)
            and (.machine_name == $p[0].machine_name)' "$1" >/dev/null 2>&1
 }
@@ -190,7 +230,7 @@ af_event_response_valid() {
 af_request() {
   local method="$1" path="$2" payload="${3:-}" header
   AF_RESP=$(mktemp)
-  header=$(af_auth_header_file)
+  header=$(af_auth_header_file) || af_error "could not create the protected curl header file"
   local -a args=(-sS -m 10 --connect-timeout 2 -o "$AF_RESP" -w '%{http_code}' \
     -H "@$header" -X "$method")
   [ -n "$payload" ] && args+=(-H "Content-Type: application/json" --data-binary "@$payload")
@@ -206,7 +246,7 @@ af_request() {
 af_request_get() {
   local path="$1" header; shift
   AF_RESP=$(mktemp)
-  header=$(af_auth_header_file)
+  header=$(af_auth_header_file) || af_error "could not create the protected curl header file"
   AF_CURL_EXIT=0
   AF_HTTP_CODE=$(curl -sS -m 10 --connect-timeout 2 -o "$AF_RESP" -w '%{http_code}' \
     -H "@$header" --get "$@" "$AF_URL$path" 2>/dev/null) || AF_CURL_EXIT=$?
@@ -243,11 +283,20 @@ af_spool_unwritable() {
 af_spool() {
   local prefix="$1" payload="$2" name tmp
   prefix=$(printf '%s' "$prefix" | tr -c 'A-Za-z0-9._-' '_')
-  mkdir -p "$AF_SPOOL" 2>/dev/null || af_spool_unwritable "$payload"
+  # Spooled payloads are private to this user: prose, repo paths and reviewer
+  # output sit here until they are flushed. The mode is set when the directory
+  # is created; an existing directory's mode is the operator's business (and
+  # silently widening it would mask an unwritable spool).
+  if [ ! -d "$AF_SPOOL" ]; then
+    mkdir -p "$AF_SPOOL" 2>/dev/null || af_spool_unwritable "$payload"
+    chmod 700 "$AF_SPOOL" 2>/dev/null || true
+  fi
   name="$prefix-$(date +%Y%m%d-%H%M%S)-$$-$RANDOM.json"
   tmp="$AF_SPOOL/.tmp.$name"
   cp "$payload" "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; af_spool_unwritable "$payload"; }
+  chmod 600 "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; af_spool_unwritable "$payload"; }
   mv "$tmp" "$AF_SPOOL/$name" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; af_spool_unwritable "$payload"; }
+  chmod 600 "$AF_SPOOL/$name" 2>/dev/null || true
   [ -s "$AF_SPOOL/$name" ] || af_spool_unwritable "$payload"
   af_warn "payload spooled to $AF_SPOOL/$name (will retry on the next submit/flush call)"
   return 0
@@ -289,6 +338,12 @@ af_prune_spool() {
     af_warn "dropping spooled friction older than 20h (past the server dedupe window): $(basename "$old") — summary was: $summary — re-file it if still relevant"
     rm -f "$old" 2>/dev/null || true
   done
+  # Orphaned staging files from an interrupted af_spool (the copy or the
+  # rename died): they were never claimed by anything and never will be.
+  { find "$AF_SPOOL" -maxdepth 1 -name '.tmp.*' -mmin +1440 -print 2>/dev/null || true; } | while read -r old; do
+    af_warn "removing orphaned spool staging file $(basename "$old")"
+    rm -f "$old" 2>/dev/null || true
+  done
   { find "$AF_SPOOL" -maxdepth 1 -name '*.rejected' \
       -mtime +"$AF_REJECTED_MAX_AGE_DAYS" -print 2>/dev/null || true; } | while read -r old; do
     af_warn "dropping rejected spool older than ${AF_REJECTED_MAX_AGE_DAYS}d: $(basename "$old")"
@@ -321,30 +376,33 @@ af_flush_spool() {
     fi
     af_request POST "$endpoint" "$claimed"
     if [ "$AF_HTTP_CODE" = 201 ] || [ "$AF_HTTP_CODE" = 200 ]; then
-      if [ "$prefix" = friction ] && ! af_friction_response_valid "$AF_RESP"; then
+      if [ "$prefix" = friction ] && ! af_friction_response_valid "$AF_RESP" "$claimed"; then
         af_warn "spooled $(basename "$claimed") received malformed friction success response — retaining for retry"
         rm -f "$AF_RESP"
         continue
       fi
       if [ "$prefix" = review ] && ! af_review_response_valid "$AF_RESP" "$claimed"; then
-        if af_review_identity_ok "$AF_RESP" "$claimed"; then
-          af_warn "spooled $(basename "$claimed") received a malformed review success response — retaining for retry"
+        # Only a comparable receipt that names a DIFFERENT record is a
+        # collision. An unparseable body, or one missing the id/identity
+        # fields, proves nothing — keep it retryable.
+        if af_identity_comparable "$AF_RESP" && ! af_review_identity_ok "$AF_RESP" "$claimed"; then
+          mv "$claimed" "${claimed%.inflight}.rejected" 2>/dev/null || true
+          af_warn "spooled $(basename "$claimed") answered with a different record — kept as .rejected"
           rm -f "$AF_RESP"
           continue
         fi
-        mv "$claimed" "${claimed%.inflight}.rejected" 2>/dev/null || true
-        af_warn "spooled $(basename "$claimed") answered with a different record — kept as .rejected"
+        af_warn "spooled $(basename "$claimed") received a malformed review success response — retaining for retry"
         rm -f "$AF_RESP"
         continue
       fi
       if [ "$prefix" = event ] && ! af_event_response_valid "$AF_RESP" "$claimed"; then
-        if af_event_identity_ok "$AF_RESP" "$claimed"; then
-          af_warn "spooled $(basename "$claimed") received a malformed event success response — retaining for retry"
+        if af_identity_comparable "$AF_RESP" && ! af_event_identity_ok "$AF_RESP" "$claimed"; then
+          mv "$claimed" "${claimed%.inflight}.rejected" 2>/dev/null || true
+          af_warn "spooled $(basename "$claimed") answered with a different record — kept as .rejected"
           rm -f "$AF_RESP"
           continue
         fi
-        mv "$claimed" "${claimed%.inflight}.rejected" 2>/dev/null || true
-        af_warn "spooled $(basename "$claimed") answered with a different record — kept as .rejected"
+        af_warn "spooled $(basename "$claimed") received a malformed event success response — retaining for retry"
         rm -f "$AF_RESP"
         continue
       fi
@@ -356,6 +414,12 @@ af_flush_spool() {
       rm -f "$AF_RESP"
       af_warn "service unreachable — deferring remaining spool to the next flush"
       break
+    elif [ "$AF_HTTP_CODE" = 401 ]; then
+      # Wrong/absent credentials are a configuration problem that gets fixed,
+      # not a payload problem: the file stays retryable (.json) so a later
+      # flush with a working key delivers it.
+      mv "$claimed" "${claimed%.inflight}.json" 2>/dev/null || true
+      af_warn "spooled $(basename "$claimed") was refused with 401 (bad or missing API key) — kept for retry once the key is fixed"
     elif [ "${AF_HTTP_CODE#4}" != "$AF_HTTP_CODE" ]; then
       mv "$claimed" "${claimed%.inflight}.rejected" 2>/dev/null || true
       af_warn "spooled $(basename "$claimed") rejected ($AF_HTTP_CODE): $(head -c 300 "$AF_RESP") — kept as .rejected"
@@ -364,6 +428,24 @@ af_flush_spool() {
     fi
     rm -f "$AF_RESP"
   done
+  return 0
+}
+
+# af_pagination_next <response-file> <current-before-id|""> <rows-in-page>
+# Echoes the next before_id, or nothing when the walk is finished. Returns 1
+# when the server's paging fields cannot be followed safely: has_more with no
+# usable cursor, a cursor that does not move strictly backwards, or an empty
+# page that still claims more. Silently returning a truncated list would look
+# exactly like an empty queue.
+af_pagination_next() {
+  local resp="$1" cur="$2" rows="$3" has_more next
+  has_more=$(jq -r 'if .has_more then "1" else "0" end' "$resp" 2>/dev/null) || return 1
+  [ "$has_more" = 1 ] || { printf ''; return 0; }
+  next=$(jq -r '.next_before_id // empty' "$resp" 2>/dev/null) || return 1
+  case "$next" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$rows" -gt 0 ] || return 1
+  if [ -n "$cur" ] && [ "$next" -ge "$cur" ]; then return 1; fi
+  printf '%s' "$next"
   return 0
 }
 

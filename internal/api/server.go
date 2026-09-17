@@ -76,9 +76,73 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/submissions/{id}", s.handleGetSubmission)
 	api.HandleFunc("GET /api/v1/export", s.handleExport)
 
-	mux.Handle("/api/v1/", requireAPIKey(s.apiKey)(api))
+	// Auth first, so an unknown /api/v1/ path answers 401 to an unauthenticated
+	// caller rather than mapping the route space for it.
+	mux.Handle("/api/v1/", requireAPIKey(s.apiKey)(jsonRouteErrors(api)))
 
-	return recoverPanic(requestID(s.observe(mux)))
+	// recoverPanic sits innermost so observe still sees the 500 it writes (and
+	// records it) and the access log line is emitted for the panicking request.
+	return requestID(s.observe(recoverPanic(mux)))
+}
+
+// discardWriter captures the status and headers a handler writes and drops the
+// body. It is used to ask the ServeMux's own no-match handler what it would
+// have answered without letting its plain-text body reach the client.
+type discardWriter struct {
+	header http.Header
+	status int
+}
+
+func (d *discardWriter) Header() http.Header {
+	if d.header == nil {
+		d.header = http.Header{}
+	}
+
+	return d.header
+}
+
+func (d *discardWriter) Write(b []byte) (int, error) {
+	if d.status == 0 {
+		d.status = http.StatusOK
+	}
+
+	return len(b), nil
+}
+
+func (d *discardWriter) WriteHeader(code int) {
+	if d.status == 0 {
+		d.status = code
+	}
+}
+
+// jsonRouteErrors makes unmatched routes under /api/v1/ answer in the API's
+// error shape instead of ServeMux's plain text. ServeMux reports a no-match by
+// returning an empty pattern from Handler; running the handler it returned
+// against a discarding writer tells 404 from 405 (and yields the Allow header
+// it computed) without re-deriving the route table here.
+func jsonRouteErrors(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, pattern := mux.Handler(r)
+		if pattern != "" {
+			mux.ServeHTTP(w, r)
+
+			return
+		}
+
+		probe := &discardWriter{}
+		h.ServeHTTP(probe, r)
+		if probe.status == http.StatusMethodNotAllowed {
+			if allow := probe.Header().Get("Allow"); allow != "" {
+				w.Header().Set("Allow", allow)
+			}
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+				"method not allowed for this route")
+
+			return
+		}
+
+		writeError(w, http.StatusNotFound, "not_found", "no such route")
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

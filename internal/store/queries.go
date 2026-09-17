@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // ErrNotFound is returned by the lookups when no row matches.
@@ -409,7 +411,15 @@ func SetSequence(ctx context.Context, q Querier, value int64) error {
 
 // IsUniqueViolation reports whether err is SQLite's unique-constraint failure.
 func IsUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+	if err == nil {
+		return false
+	}
+	if primary, full, ok := sqliteCode(err); ok {
+		return full == sqlite3.SQLITE_CONSTRAINT_UNIQUE || full == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY ||
+			(primary == sqlite3.SQLITE_CONSTRAINT && strings.Contains(err.Error(), "UNIQUE constraint failed"))
+	}
+
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // VacuumInto writes a consistent copy of the database to dest.

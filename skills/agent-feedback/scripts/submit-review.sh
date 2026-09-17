@@ -28,8 +28,9 @@
 #   {"status":"mismatch","run_id":"...","message":"..."}   (409 — content differs)
 #   {"status":"collision","run_id":"..."}          (server returned another record)
 #   {"status":"rejected","run_id":"...","http_status":N,"message":"..."}
+#   {"status":"skipped","reason":"...","run_id":"..."}   (nothing safe to send)
 # Direct mode exits 1 on rejected/mismatch/collision or an unsafe incomplete
-# scorecard; sweep always exits 0.
+# scorecard; sweep always exits 0 and only warns per run.
 #
 # --sweep (single instance per machine, mkdir lock):
 #   1. flush the spool;
@@ -55,7 +56,22 @@ SWEEP_MIN_AGE_HOURS="${SWEEP_MIN_AGE_HOURS:-2}"
 usage() {
   echo "usage: submit-review.sh <run_dir> [--include-outputs]" >&2
   echo "       submit-review.sh --sweep" >&2
-  exit 1
+  af_reject "${1:-invalid arguments (see usage above)}"
+}
+
+# build_payload communicates through globals: it is called directly (never in a
+# command substitution, which would be a subshell that cannot hand a skip
+# reason back) so every skip ends with an outcome line in direct mode.
+AF_PAYLOAD_FILE=""
+AF_SKIP_REASON=""
+AF_SKIP_RUN_ID=""
+
+# af_skip <run-id> <reason> — record why nothing was sent.
+af_skip() {
+  AF_SKIP_RUN_ID="$1"
+  AF_SKIP_REASON="$2"
+  af_warn "$1: $2 — NOT submitting"
+  return 1
 }
 
 # scorecard_timestamp_ambiguous <run-dir> <run-ts> — scorecards.tsv predates
@@ -84,20 +100,38 @@ scorecard_timestamp_ambiguous() {
 build_payload() {
   local run_dir="$1" include_outputs="$2"
   local meta="$run_dir/meta.json"
-  [ -f "$meta" ] || { af_warn "no meta.json in $run_dir (predates integration) — skipping"; return 1; }
-  [ -s "$run_dir/summary.tsv" ] || { af_warn "no summary.tsv in $run_dir — skipping"; return 1; }
+  local fallback_id; fallback_id=$(basename "$run_dir")
+  AF_PAYLOAD_FILE=""
+  [ -f "$meta" ] || { af_skip "$fallback_id" "no meta.json (predates integration)"; return 1; }
+  [ -s "$run_dir/summary.tsv" ] || { af_skip "$fallback_id" "no summary.tsv"; return 1; }
 
+  # Every read is checked explicitly: inside a function called in a `||` list,
+  # `set -e` is disabled, so an unchecked failure would keep going silently.
   local machine skill run_ts run_id coordinator
-  machine=$(jq -r '.machine' "$meta")
-  skill=$(jq -r '.skill' "$meta")
-  run_ts=$(jq -r '.run_ts' "$meta")
+  machine=$(jq -r '.machine // empty' "$meta" 2>/dev/null) \
+    || { af_skip "$fallback_id" "unreadable meta.json"; return 1; }
+  skill=$(jq -r '.skill // empty' "$meta" 2>/dev/null) \
+    || { af_skip "$fallback_id" "unreadable meta.json"; return 1; }
+  run_ts=$(jq -r '.run_ts // empty' "$meta" 2>/dev/null) \
+    || { af_skip "$fallback_id" "unreadable meta.json"; return 1; }
+  coordinator=$(jq -r '.caller // "unknown"' "$meta" 2>/dev/null) \
+    || { af_skip "$fallback_id" "unreadable meta.json"; return 1; }
+
+  # Trim what the server trims, so the receipt comparison compares the values
+  # the server actually stored.
+  machine=$(af_trim "$machine")
+  skill=$(af_trim "$skill")
+  run_ts=$(af_trim "$run_ts")
+  coordinator=$(af_trim "$coordinator")
+  [ -n "$coordinator" ] || coordinator="unknown"
+
+  [ -n "$machine" ] && [ -n "$skill" ] && [ -n "$run_ts" ] \
+    || { af_skip "$fallback_id" "malformed meta.json (machine/skill/run_ts missing)"; return 1; }
+
   run_id="$machine-$(basename "$run_dir")"
 
-  # Attribution belongs to the run, not the later shell that retries it.
-  coordinator=$(jq -r '.caller // "unknown"' "$meta")
-
   local work
-  work=$(mktemp -d) || { af_warn "could not create a temporary directory"; return 1; }
+  work=$(mktemp -d) || { af_skip "$run_id" "could not create a temporary directory"; return 1; }
 
   # Scorecards are timestamp-keyed by the external runner. Refuse to borrow
   # rows when sibling run directories share a timestamp; their score rows
@@ -105,8 +139,9 @@ build_payload() {
   local ledger
   ledger="$(dirname "$run_dir")/scorecards.tsv"
   if [ -f "$ledger" ] && scorecard_timestamp_ambiguous "$run_dir" "$run_ts"; then
-    af_warn "multiple run directories share scorecard timestamp $run_ts — NOT submitting ambiguous run $run_id"
-    rm -rf "$work"; return 1
+    rm -rf "$work"
+    af_skip "$run_id" "ambiguous timestamp: multiple run directories share scorecard timestamp $run_ts"
+    return 1
   fi
 
   local rows_f="$work/score-rows.json" scores_f="$work/scores.json"
@@ -126,18 +161,32 @@ build_payload() {
                    valid: (.valid_text | optional_number),
                    invalid: (.invalid_text | optional_number),
                    note: (.note // "")})' >"$rows_f"; then
-      af_warn "could not parse scorecard ledger for $run_id — NOT submitting"
-      rm -rf "$work"; return 1
+      rm -rf "$work"
+      af_skip "$run_id" "could not parse the scorecard ledger"
+      return 1
     fi
   fi
-  jq -c 'map(select(.score != null))' "$rows_f" >"$scores_f"
+  jq -c 'map(select(.score != null))' "$rows_f" >"$scores_f" \
+    || { rm -rf "$work"; af_skip "$run_id" "could not parse the scorecard ledger"; return 1; }
 
   # Reviewers from summary.tsv (slot, model, status, duration_s, bytes).
+  # Tabs are IFS whitespace, so `IFS=$'\t' read` collapses consecutive tabs and
+  # loses empty fields; the separator is translated to \034 (a non-whitespace
+  # IFS character) so every column keeps its position, blank or not. The
+  # `|| [ -n "$slot" ]` tail keeps a final row that has no trailing newline.
   local slot model status dur bytes out_file want_output i=0
   local empty="$work/empty"; : >"$empty"
   local revdir="$work/reviewers"; mkdir -p "$revdir"
-  while IFS=$'\t' read -r slot model status dur bytes; do
+  while IFS=$'\034' read -r slot model status dur bytes || [ -n "$slot" ]; do
     [ -n "$slot" ] || continue
+    # Non-numeric timings are dropped, never sent: the server would 400 on the
+    # whole run because one column was garbled.
+    case "$dur" in
+      ''|*[!0-9.]*) [ -z "$dur" ] || { af_warn "$run_id: non-numeric duration_s \"$dur\" for slot $slot — omitting it"; dur=""; } ;;
+    esac
+    case "$bytes" in
+      ''|*[!0-9]*) [ -z "$bytes" ] || { af_warn "$run_id: non-numeric bytes \"$bytes\" for slot $slot — omitting it"; bytes=""; } ;;
+    esac
     want_output=0
     out_file="$empty"
     if [ "$include_outputs" = 1 ] && [ -s "$run_dir/$slot.md" ]; then
@@ -163,15 +212,18 @@ build_payload() {
                + (if $sc.valid   != null then {valid: $sc.valid} else {} end)
                + (if $sc.invalid != null then {invalid: $sc.invalid} else {} end)
                + (if ($sc.note // "") != "" then {note: $sc.note} else {} end))
-            else {} end)' >"$revdir/$(printf '%05d' "$i").json"
-  done < <(tail -n +2 "$run_dir/summary.tsv")
+            else {} end)' >"$revdir/$(printf '%05d' "$i").json" \
+      || { rm -rf "$work"; af_skip "$run_id" "could not build the reviewer row for slot $slot"; return 1; }
+  done < <(tail -n +2 "$run_dir/summary.tsv" | tr '\t' '\034')
 
   local reviewers_f="$work/reviewers.json"
   if [ "$i" -eq 0 ]; then
-    af_warn "no reviewer rows in $run_dir/summary.tsv — nothing to submit"
-    rm -rf "$work"; return 1
+    rm -rf "$work"
+    af_skip "$run_id" "no reviewer rows in summary.tsv"
+    return 1
   fi
-  jq -sc '.' "$revdir"/*.json >"$reviewers_f"
+  jq -sc '.' "$revdir"/*.json >"$reviewers_f" \
+    || { rm -rf "$work"; af_skip "$run_id" "could not assemble the reviewer rows"; return 1; }
 
   # A completed reviewer must have exactly one numeric grade. Never claim the
   # write-once run_id before the scorecard is complete enough to be trustworthy.
@@ -189,10 +241,12 @@ build_payload() {
         | if $label == "" then "\($slot) (no scorecard label)"
           else "\($slot) (\($label))" end
       ]
-      | join(", ")')
+      | join(", ")') \
+    || { rm -rf "$work"; af_skip "$run_id" "could not evaluate the scorecard"; return 1; }
   if [ -n "$incomplete" ]; then
-    af_warn "incomplete scorecard for completed reviewer(s) in $run_id: $incomplete — NOT submitting"
-    rm -rf "$work"; return 1
+    rm -rf "$work"
+    af_skip "$run_id" "incomplete scorecard for completed reviewer(s): $incomplete"
+    return 1
   fi
 
   local prompt_file="$empty" want_prompt=0
@@ -202,17 +256,22 @@ build_payload() {
   fi
 
   local payload
-  payload=$(mktemp)
-  jq -n \
+  payload=$(mktemp) || { rm -rf "$work"; af_skip "$run_id" "could not create a temporary file"; return 1; }
+  if ! jq -n \
     --arg skill "$skill" --arg machine "$machine" \
     --arg coordinator "$coordinator" --arg run_id "$run_id" \
     --rawfile prompt "$prompt_file" --argjson want_prompt "$want_prompt" \
     --slurpfile reviewers "$reviewers_f" \
     '{skill: $skill, machine_name: $machine, coordinator_model: $coordinator,
       run_id: $run_id, reviewers: $reviewers[0]}
-     + (if $want_prompt == 1 and $prompt != "" then {prompt: $prompt} else {} end)' >"$payload"
+     + (if $want_prompt == 1 and $prompt != "" then {prompt: $prompt} else {} end)' >"$payload"; then
+    rm -rf "$work"; rm -f "$payload"
+    af_skip "$run_id" "could not build the review payload"
+    return 1
+  fi
   rm -rf "$work"
-  printf '%s\n' "$payload"
+  AF_PAYLOAD_FILE="$payload"
+  return 0
 }
 
 # submit_run <run_dir> <include_outputs> <mode> — POST + outcome handling.
@@ -221,10 +280,15 @@ build_payload() {
 submit_run() {
   local run_dir="$1" include_outputs="$2" mode="$3"
   local payload run_id rc=0
-  payload=$(build_payload "$run_dir" "$include_outputs") || {
+  if ! build_payload "$run_dir" "$include_outputs"; then
+    # Sweep keeps its per-run warning and exits 0; direct mode must still end
+    # with exactly one machine-readable outcome line.
     [ "$mode" = sweep ] && return 0
+    af_outcome "$(jq -cn --arg r "$AF_SKIP_REASON" --arg run_id "$AF_SKIP_RUN_ID" \
+      '{status:"skipped",reason:$r,run_id:$run_id}')"
     return 1
-  }
+  fi
+  payload="$AF_PAYLOAD_FILE"
   run_id=$(jq -r '.run_id' "$payload")
 
   af_request POST "/api/v1/reviews" "$payload"
@@ -235,13 +299,16 @@ submit_run() {
       # .submitted marker suppresses every later retry, so it is written only
       # after that check passes.
       if af_review_response_valid "$AF_RESP" "$payload"; then
-        jq -r '.id' "$AF_RESP" >"$run_dir/.submitted"
+        # The marker suppresses every later retry: if it cannot be written the
+        # run would be re-submitted forever, so say so rather than fail silently.
+        jq -r '.id' "$AF_RESP" >"$run_dir/.submitted" \
+          || af_warn "could not write $run_dir/.submitted — this run will be retried by the next sweep"
         if [ "$AF_HTTP_CODE" = 201 ]; then
           af_outcome "$(jq -c --arg run_id "$run_id" '{status:"submitted",id:.id,run_id:$run_id}' "$AF_RESP")"
         else
           af_outcome "$(jq -c --arg run_id "$run_id" '{status:"duplicate",id:.id,run_id:$run_id}' "$AF_RESP")"
         fi
-      elif ! af_review_identity_ok "$AF_RESP" "$payload"; then
+      elif af_identity_comparable "$AF_RESP" && ! af_review_identity_ok "$AF_RESP" "$payload"; then
         af_warn "run_id collision: server returned a different record for $run_id — NOT marking submitted"
         af_outcome "$(jq -cn --arg run_id "$run_id" '{status:"collision",run_id:$run_id}')"
         rc=1
@@ -384,7 +451,7 @@ sweep() {
       run_dir="${run_dir%/}"
       [ -f "$run_dir/meta.json" ] || continue
       [ -f "$run_dir/.submitted" ] && continue
-      run_ts=$(jq -r '.run_ts' "$run_dir/meta.json")
+      run_ts=$(jq -r '.run_ts // empty' "$run_dir/meta.json" 2>/dev/null) || run_ts=""
       # run_ts is fixed-width zero-padded: string compare IS chronological.
       [ -n "$cutoff" ] && [ "$run_ts" \> "$cutoff" ] && continue
       submit_run "$run_dir" 0 sweep || true   # sweep is best-effort; outcomes are printed per run
@@ -402,13 +469,20 @@ case "${1:-}" in
     sweep
     ;;
   ""|--help|-h)
-    usage
+    usage "a run directory or --sweep is required"
     ;;
   *)
     RUN_DIR="${1%/}"
-    [ -d "$RUN_DIR" ] || af_die "not a directory: $RUN_DIR"
+    [ -d "$RUN_DIR" ] || af_reject "not a directory: $RUN_DIR"
+    shift
     INCLUDE_OUTPUTS=0
-    [ "${2:-}" = "--include-outputs" ] && INCLUDE_OUTPUTS=1
+    # A flag typo must never submit with the wrong options silently.
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --include-outputs) INCLUDE_OUTPUTS=1; shift ;;
+        *) af_reject "unknown flag: $1 (see header for usage)" ;;
+      esac
+    done
     af_require_key
     af_flush_spool
     rc=0

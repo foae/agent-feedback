@@ -121,12 +121,15 @@ docker compose run --rm -v "$PWD/feedback.jsonl:/import.jsonl:ro" feedback impor
 docker compose start feedback
 ```
 
-`feedback import` runs in one transaction, preserves `id`, `created_at`,
-`processed_at`, `resolution` and `payload_hash`, advances the id sequence past
-the highest imported id, and refuses a non-empty database (`--allow-nonempty`
-to merge) or a filtered export (`--allow-partial`). Use
-`--reserve-ids-through N` to keep ids below `N` from ever being reused, for
-example when archived rows were left out of the import.
+`feedback import` runs in one transaction and verifies the header, record
+count and digest before committing anything. It preserves `id`, `created_at`,
+`processed_at`, `resolution` and `payload_hash` (recomputing and checking each
+hash; `--trust-hashes` skips the check), advances the id sequence past the
+highest id in the stream (skipped rows included, so archived ids are never
+reused), and refuses a non-empty database (`--allow-nonempty` to merge) or a
+filtered export (`--allow-partial`). `--family friction` imports only that
+family from a full export; `--reserve-ids-through N` raises the sequence
+further when needed. Flags go before the file name.
 
 **Migrate from the 1.x PostgreSQL deployment**:
 
@@ -136,12 +139,23 @@ example when archived rows were left out of the import.
    `bash scripts/export-v1-postgres.sh > v1.jsonl` (run beside the old
    compose file; it emits the API 1.1 export format, including
    `payload_hash`, and prints the row count).
-3. Split what you keep: `jq -c 'select(.family=="friction")' v1.jsonl > frictions.jsonl`
-   and archive the rest.
+3. Keep `v1.jsonl` whole: its header and terminator are what the importer
+   verifies. Note the highest id in it (`tail -2 v1.jsonl | head -1 | jq .id`).
 4. Stop the old stack (`docker compose down`, keep the volume), install the
-   new stack in the same directory with `scripts/deploy.sh`, then import:
-   `feedback import frictions.jsonl --reserve-ids-through <max id in v1.jsonl>`.
-5. Start, check `/ready`, list the queue, and compare counts with the export.
+   new stack in the same directory with `scripts/deploy.sh`, then import
+   only the frictions, reserving every old id (flags come before the file):
+
+   ```bash
+   docker compose stop feedback
+   docker compose run --rm -v "$PWD/v1.jsonl:/import.jsonl:ro" feedback \
+     import --family friction --reserve-ids-through <highest id> /import.jsonl
+   docker compose start feedback
+   ```
+
+   The summary reports `imported`, `skipped` (the archived review rows) and
+   the id sequence. Keep `v1.jsonl` as the archive of the review rows.
+5. Check `/ready`, list the queue, and compare the friction count and the
+   unprocessed count with the export.
 6. Keep the old PostgreSQL volume until you are sure; `docker volume rm` it
    afterwards.
 

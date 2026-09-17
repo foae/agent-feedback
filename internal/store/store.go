@@ -16,7 +16,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	_ "modernc.org/sqlite" // database/sql driver "sqlite"
+	sqlitedrv "modernc.org/sqlite" // database/sql driver "sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 //go:embed migrations/*.sql
@@ -123,6 +124,10 @@ type Querier interface {
 func (db *DB) Write(ctx context.Context, fn func(Querier) error) error {
 	tx, err := db.writer.BeginTx(ctx, nil)
 	if err != nil {
+		// BEGIN IMMEDIATE takes the write lock, so the saturation shows up
+		// here as often as inside fn.
+		db.countIfBusy(err)
+
 		return fmt.Errorf("begin write transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
@@ -143,14 +148,41 @@ func (db *DB) Write(ctx context.Context, fn func(Querier) error) error {
 }
 
 func (db *DB) countIfBusy(err error) {
-	if err == nil {
-		return
-	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "database is locked") ||
-		strings.Contains(msg, "database table is locked") {
+	if IsBusy(err) {
 		db.busyWrites.Add(1)
 	}
+}
+
+// sqliteCode returns the SQLite result code carried by err, masked down to its
+// primary code, and whether err carried one at all. modernc.org/sqlite wraps
+// every library failure in its exported *sqlite.Error, so classification does
+// not have to parse messages; extended codes (SQLITE_BUSY_SNAPSHOT and the
+// like) share the low byte with their primary code.
+func sqliteCode(err error) (primary, full int, ok bool) {
+	var serr *sqlitedrv.Error
+	if !errors.As(err, &serr) {
+		return 0, 0, false
+	}
+	code := serr.Code()
+
+	return code & 0xff, code, true
+}
+
+// IsBusy reports whether err is SQLite's "database is locked" failure: the
+// write transaction could not take the lock before busy_timeout elapsed.
+func IsBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	if primary, _, ok := sqliteCode(err); ok {
+		return primary == sqlite3.SQLITE_BUSY || primary == sqlite3.SQLITE_LOCKED
+	}
+	// Errors that reach here were produced outside the driver (or had their
+	// chain flattened to a string); the message is all that is left.
+	msg := strings.ToLower(err.Error())
+
+	return strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked")
 }
 
 // BusyWrites reports how many write transactions failed because the database

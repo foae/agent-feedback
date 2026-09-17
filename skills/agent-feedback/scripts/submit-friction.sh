@@ -70,7 +70,7 @@ while [ $# -gt 0 ]; do
     --model)         MODEL="${2:-}"; shift 2 ;;
     --stdin)         STDIN_MODE=1; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
-    *) af_die "unknown flag: $1 (see header for usage)" ;;
+    *) af_reject "unknown flag: $1 (see header for usage)" ;;
   esac
 done
 
@@ -79,6 +79,11 @@ if [ "$STDIN_MODE" = 1 ]; then
   cat >"$STDIN_F"
   jq -e 'type == "object"' "$STDIN_F" >/dev/null 2>&1 \
     || { af_outcome '{"status":"rejected","message":"--stdin input is not a JSON object"}'; exit 1; }
+  # jq accepts a concatenated stream of documents; only the first would ever be
+  # read, so several documents are a mistake, not an input.
+  STDIN_DOCS=$(jq -c . "$STDIN_F" 2>/dev/null | wc -l | tr -d ' ')
+  [ "$STDIN_DOCS" = 1 ] \
+    || af_reject "--stdin input must be a single JSON object (got $STDIN_DOCS JSON documents)"
   UNKNOWN=$(jq -r '[keys[] | select(. as $k | ["category","summary","details","suggested_fix","project","harness","model","machine","context"] | index($k) | not)] | join(",")' "$STDIN_F")
   if [ -n "$UNKNOWN" ]; then
     af_outcome "$(jq -cn --arg k "$UNKNOWN" '{status:"rejected",message:("unknown keys in --stdin input: "+$k)}')"
@@ -155,6 +160,10 @@ jq -n \
    + (if $harness != "" then {harness: $harness} else {} end)
    + {context: $context[0]}' >"$PAYLOAD"
 
+PAYLOAD_BYTES=$(wc -c <"$PAYLOAD" | tr -d ' ')
+[ "$PAYLOAD_BYTES" -le "$AF_MAX_BODY_BYTES" ] \
+  || af_reject "friction request body is $PAYLOAD_BYTES bytes, over the ${AF_MAX_BODY_BYTES}-byte limit"
+
 if [ "$DRY_RUN" = 1 ]; then
   cat "$PAYLOAD"
   echo
@@ -168,7 +177,7 @@ af_flush_spool
 af_request POST "/api/v1/frictions" "$PAYLOAD"
 case "$AF_HTTP_CODE" in
   201|200)
-    if af_friction_response_valid "$AF_RESP"; then
+    if af_friction_response_valid "$AF_RESP" "$PAYLOAD"; then
       if [ "$AF_HTTP_CODE" = 201 ]; then
         af_outcome "$(jq -c '{status:"submitted",id:.id}' "$AF_RESP")"
       else

@@ -32,6 +32,17 @@ func newTestServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// newTestServerWithoutService builds a server whose Service is nil, so any
+// handler that reaches the core layer panics.
+func newTestServerWithoutService(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(New(Config{APIKey: testAPIKey}).Handler())
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
 func do(t *testing.T, srv *httptest.Server, method, path, body string, auth bool) (int, []byte) {
 	t.Helper()
 

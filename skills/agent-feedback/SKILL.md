@@ -100,12 +100,19 @@ JSON outcome. Relay it to the user verbatim.
 | `{"status":"spooled","reason":"…"}` | service unreachable or 5xx; saved locally, retried on the next call | 0 |
 | `{"status":"valid"}` | `--dry-run` passed local validation | 0 |
 | `{"status":"mismatch",…}` | review/event replay differs from the stored record (409); submit a correction under a new key | 1 |
+| `{"status":"collision",…}` | the server answered with a different record (another key or machine); nothing was marked | 1 |
 | `{"status":"rejected",…}` | payload bug (4xx or local validation); do not retry as-is | 1 |
+| `{"status":"skipped","reason":"…"}` | `submit-review.sh` found the run incomplete or unparseable; nothing was sent | 1 |
 | `{"status":"failed","reason":"spool_unwritable",…}` | could not send and could not save; the payload is printed to stderr for recovery | 1 |
+| `{"status":"error","message":"…"}` | configuration, transport or HTTP failure in a read or process command; nothing changed | 1 |
 
-Spool location: `~/.cache/agent-feedback/spool/`. Frictions are retried for
-20 hours (inside the server's 24 hour dedupe window, so a retry can never
-double-file); reviews and events for 30 days (they are idempotent). Every
+Spool location: `~/.cache/agent-feedback/spool/` (owner-only). `spooled`
+means the payload file is written and renamed into place; a power loss in
+the same instant can still lose it, so a backlog warning plus the payload on
+stderr is the recovery path, not a durability guarantee. Frictions are
+retried for 20 hours (inside the server's 24 hour dedupe window, so a retry
+can never double-file); reviews and events for 30 days (they are idempotent).
+A `401` leaves spooled payloads retryable so a key fix flushes them. Every
 script prints a one-line backlog warning on stderr while unsent payloads
 exist; surface it, it is the only signal the service is down. The scripts
 never print the API key, and send it via a mode-0600 header file, not argv.
@@ -134,12 +141,15 @@ An unexpected `unchanged` means the row was already in that state. One
 bash scripts/query.sh --family friction --processed false --include-payload
 bash scripts/query.sh --type deploy --since 2026-09-01T00:00:00Z --limit 20
 bash scripts/query.sh 43 | jq .payload
-bash scripts/query.sh export --family friction > frictions.jsonl   # verifies the export terminator
+bash scripts/query.sh export > backup.jsonl   # stdout is the verified NDJSON; the verdict goes to stderr
 ```
 
 Raw JSON out. List rows are summaries (frictions carry `category`, `summary`,
 `project`, `harness`); pass `--include-payload` or fetch by id for payloads.
 `--before-id N` continues a page. Read-only unless `--flush` is given.
+`export` verifies the header, record count and SHA-256 digest; on any
+mismatch it exits 1 and prints an `error` outcome on stderr while still
+writing what it received.
 
 ## Submit an event
 
@@ -182,8 +192,10 @@ overwrites.
 - `<slot>.md`: raw reviewer output (sent only with `--include-outputs`).
 - `prompt.md`: the review prompt (sent only with `--include-outputs`).
 - `../scorecards.tsv` beside the run directories: grading ledger keyed by
-  `run_ts` and reviewer **label**, columns `run_ts label score valid invalid note`;
-  `PENDING` rows mean not yet graded.
+  `run_ts` and reviewer **label**, tab-separated columns
+  `run_ts source label score valid invalid note` (`source` is free-form,
+  e.g. the grading session; `valid`, `invalid`, `note` may be empty);
+  `PENDING` in `score` means not yet graded.
 
 Every completed reviewer must have a grade before submission. `run_id` is
 `<machine>-<run_ts>-<pid>`. A `.submitted` file holding the record id is

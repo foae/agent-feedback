@@ -19,12 +19,15 @@
 # older style and cannot be combined with --before-id (the server rejects it).
 # --include-payload returns full records instead of scannable summaries.
 #
-# `export` streams every record as newline-delimited JSON to stdout: a header
+# `export` writes every record as newline-delimited JSON to stdout: a header
 # line, one record per line, then the terminator carrying the record count and
-# their SHA-256. Both are verified after the stream ends; a missing or
-# disagreeing terminator means the stream is damaged — what was received is
-# still printed, and the exit status is 1. Never restore from a stream that
-# exited 1.
+# their SHA-256. STDOUT STAYS PURE NDJSON so it can be redirected to a backup
+# file — the verification result ("export verified: N record(s)") and every
+# warning go to stderr, never stdout. The header line, the count and the digest
+# are all verified once the stream has been received; a damaged stream is still
+# printed but the exit status is 1. Never restore from a stream that exited 1.
+# A transport failure or an HTTP error prints nothing on stdout except a single
+# {"status":"error","message":"..."} outcome line, and exits 1.
 #
 # Examples:
 #   query.sh --type review-panel --limit 20
@@ -46,34 +49,56 @@ af_sha256() {
   else printf ''; fi
 }
 
+# Temp paths are script-global: an EXIT trap cannot see a function's locals
+# (they are already out of scope when it fires), so function-local paths leak
+# their files into $TMPDIR.
+AF_EXPORT_RAW=""
+AF_EXPORT_BODY=""
+AF_EXPORT_HEADER=""
+export_cleanup() {
+  rm -f "${AF_EXPORT_RAW:-}" "${AF_EXPORT_BODY:-}" "${AF_EXPORT_HEADER:-}" 2>/dev/null || true
+}
+
 export_cmd() {
   local -a PARAMS=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --family) PARAMS+=(--data-urlencode "family=${2:-}"); shift 2 ;;
       --since)  PARAMS+=(--data-urlencode "since=${2:-}"); shift 2 ;;
-      *) af_die "unknown flag for export: $1 (see header for usage)" ;;
+      *) af_reject "unknown flag for export: $1 (see header for usage)" ;;
     esac
   done
 
-  local header raw rc=0
-  header=$(af_auth_header_file)
-  raw=$(mktemp)
-  trap 'rm -f "${raw:-}" "${header:-}"' EXIT
-  # No -m cap: a full export is as long as the database is big. The stream is
-  # printed as it arrives and copied for verification.
-  curl -sS --fail --connect-timeout 5 -H "@$header" --get "${PARAMS[@]}" \
-    "$AF_URL/api/v1/export" | tee "$raw"
-  rc="${PIPESTATUS[0]}"
-  rm -f "$header"
-  if [ "$rc" != 0 ]; then
-    af_warn "export stream failed (curl exit $rc) — the output above is INCOMPLETE"
-    return 1
+  local code rc=0
+  AF_EXPORT_HEADER=$(af_auth_header_file) || af_error "could not create the protected curl header file"
+  AF_EXPORT_RAW=$(mktemp)
+  trap 'export_cleanup' EXIT
+  # curl never runs in a pipeline here: under `set -o pipefail` a downstream
+  # failure would be reported as curl's, and PIPESTATUS gymnastics hide the
+  # HTTP status. No -m cap either — a full export is as long as the database.
+  code=$(curl -sS --fail-with-body --connect-timeout 5 -o "$AF_EXPORT_RAW" \
+    -w '%{http_code}' -H "@$AF_EXPORT_HEADER" --get \
+    ${PARAMS[@]+"${PARAMS[@]}"} "$AF_URL/api/v1/export" 2>/dev/null) || rc=$?
+  rm -f "$AF_EXPORT_HEADER"; AF_EXPORT_HEADER=""
+  [ -n "$code" ] || code=000
+  if [ "$code" = 000 ]; then
+    af_error "export failed: service unreachable (curl exit $rc) at $AF_URL"
+  fi
+  if [ "$code" != 200 ]; then
+    af_error "export failed: HTTP $code: $(head -c 300 "$AF_EXPORT_RAW" | tr -d '\n')"
   fi
 
-  local lines last count records digest want_digest
-  lines=$(wc -l <"$raw" | tr -d ' ')
-  last=$(tail -n1 "$raw")
+  # Pure NDJSON on stdout; everything below reports to stderr only.
+  cat "$AF_EXPORT_RAW"
+
+  local lines first last count records digest want_digest
+  lines=$(wc -l <"$AF_EXPORT_RAW" | tr -d ' ')
+  first=$(head -n1 "$AF_EXPORT_RAW")
+  last=$(tail -n1 "$AF_EXPORT_RAW")
+  if ! jq -e 'select(type == "object") | .export_format == 1' <<<"$first" >/dev/null 2>&1; then
+    af_warn "export does not start with an {\"export_format\":1,...} header — this is not an export stream; do NOT treat it as a backup"
+    return 1
+  fi
   if ! jq -e 'select(type == "object") | .export_complete == true' <<<"$last" >/dev/null 2>&1; then
     af_warn "export is missing its {\"export_complete\":true,...} terminator — the stream is truncated; do NOT treat it as a backup"
     return 1
@@ -81,25 +106,31 @@ export_cmd() {
   count=$(jq -r '.count // empty' <<<"$last")
   want_digest=$(jq -r '.sha256 // empty' <<<"$last")
   # Line 1 is the export header, the last line the terminator; everything
-  # between them is a record.
+  # between them is a record. An empty export is exactly those two lines.
   records=$((lines - 2))
   [ "$records" -ge 0 ] || records=0
   if [ "$records" != "$count" ]; then
-    af_warn "export terminator claims $count record(s) but $records were received — the stream is damaged; do NOT treat it as a backup"
+    af_warn "export terminator claims ${count:-no} record(s) but $records were received — the stream is damaged; do NOT treat it as a backup"
     return 1
   fi
-  if [ -n "$want_digest" ]; then
-    local body
-    body=$(mktemp)
-    sed -n "2,$((lines - 1))p" "$raw" >"$body"
-    digest=$(af_sha256 "$body")
-    rm -f "$body"
-    if [ -z "$digest" ]; then
-      af_warn "no sha256sum/shasum available — export digest NOT verified (count checked: $count records)"
-    elif [ "$digest" != "$want_digest" ]; then
-      af_warn "export digest mismatch: terminator says $want_digest, received records hash to $digest — do NOT treat it as a backup"
-      return 1
-    fi
+  if [ -z "$want_digest" ]; then
+    af_warn "export terminator carries no sha256 — the stream cannot be verified; do NOT treat it as a backup"
+    return 1
+  fi
+  AF_EXPORT_BODY=$(mktemp)
+  if [ "$records" -gt 0 ]; then
+    sed -n "2,$((lines - 1))p" "$AF_EXPORT_RAW" >"$AF_EXPORT_BODY"
+  else
+    : >"$AF_EXPORT_BODY"
+  fi
+  digest=$(af_sha256 "$AF_EXPORT_BODY")
+  if [ -z "$digest" ]; then
+    af_warn "no sha256sum/shasum available — the export digest CANNOT be verified; do NOT treat it as a backup"
+    return 1
+  fi
+  if [ "$digest" != "$want_digest" ]; then
+    af_warn "export digest mismatch: terminator says $want_digest, received records hash to $digest — do NOT treat it as a backup"
+    return 1
   fi
   af_warn "export verified: $count record(s)"
   return 0
@@ -107,8 +138,10 @@ export_cmd() {
 
 if [ "${1:-}" = "export" ]; then
   shift
-  export_cmd "$@"
-  exit $?
+  rc=0
+  export_cmd "$@" || rc=$?
+  export_cleanup
+  exit "$rc"
 fi
 
 FLUSH=0
@@ -128,33 +161,28 @@ else
       --since)     add since "${2:-}"; shift 2 ;;
       --until)     add until "${2:-}"; shift 2 ;;
       --processed)
-        case "${2:-}" in true|false) ;; *) af_die "--processed must be true or false" ;; esac
+        case "${2:-}" in true|false) ;; *) af_reject "--processed must be true or false" ;; esac
         add processed "$2"; shift 2 ;;
       --limit)     add limit "${2:-}"; shift 2 ;;
       --before-id) add before_id "${2:-}"; shift 2 ;;
       --offset)    add offset "${2:-}"; shift 2 ;;
       --include-payload) add include payload; shift ;;
       --flush)     FLUSH=1; shift ;;
-      *) af_die "unknown flag: $1 (see header for usage)" ;;
+      *) af_reject "unknown flag: $1 (see header for usage)" ;;
     esac
   done
 fi
 
 [ "$FLUSH" = 1 ] && af_flush_spool
 
-if [ ${#PARAMS[@]} -gt 0 ]; then
-  af_request_get "$PATH_Q" "${PARAMS[@]}"
-else
-  af_request_get "$PATH_Q"
-fi
+af_request_get "$PATH_Q" ${PARAMS[@]+"${PARAMS[@]}"}
 trap 'rm -f "${AF_RESP:-}"' EXIT
 
 if [ "$AF_HTTP_CODE" = 200 ]; then
   cat "$AF_RESP"; echo
 elif [ "$AF_HTTP_CODE" = 000 ]; then
-  af_die "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
+  af_error "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
 else
-  af_warn "HTTP $AF_HTTP_CODE: $(head -c 400 "$AF_RESP")"
-  exit 1
+  af_error "HTTP $AF_HTTP_CODE: $(head -c 400 "$AF_RESP" | tr -d '\n')"
 fi
 af_backlog_warning

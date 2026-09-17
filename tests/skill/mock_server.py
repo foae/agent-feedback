@@ -7,13 +7,21 @@ Usage: mock_server.py <state_dir>
   <state_dir>/mode            read per request: created | duplicate | reject400 |
                               error500 | replay200 | mismatch409 | collision200 |
                               friction_bad_created | friction_wrong_duplicate |
-                              review_bad_created | export_no_terminator
+                              review_bad_created | review_wrong_type |
+                              review_unparseable | event_bad_created |
+                              event_unparseable | event_collision |
+                              pagination_bad | processed_bad |
+                              export_no_terminator | export_bad_header |
+                              export_http_500 | export_empty
                               (missing file -> created)
   <state_dir>/list_rows       how many rows the list/export fixtures hold (default 1)
   <state_dir>/list_page_cap   optional hard cap on the rows returned per list
                               page, so pagination can be exercised with a
                               handful of rows (missing file -> no extra cap)
-  <state_dir>/requests.jsonl  one JSON line per request received
+  <state_dir>/requests.jsonl  one JSON line per request received; each entry
+                              carries both the parsed `body` and the exact
+                              request bytes as `raw` (so byte-for-byte payload
+                              forwarding can be asserted)
 
 Contract notes this mock reproduces:
   * every record carries `family` and `payload_hash`
@@ -35,6 +43,9 @@ from urllib.parse import parse_qs, urlparse
 STATE = sys.argv[1]
 EVENTS = {}
 NEXT_EVENT_ID = [500]
+# Submissions the processed endpoint knows about, and their current mark.
+KNOWN_IDS = set(range(1, 2001)) | {43, 44}
+MARKED = {}
 
 
 def mode():
@@ -97,12 +108,13 @@ class Handler(BaseHTTPRequestHandler):
             or self.headers.get("X-Api-Key") == "testkey"
         )
 
-    def _record(self, body):
+    def _record(self, body, raw=None):
         entry = {
             "method": self.command,
             "path": self.path,
             "auth": bool(self._auth_ok()),
             "body": body,
+            "raw": raw,
         }
         with open(os.path.join(STATE, "requests.jsonl"), "a") as f:
             f.write(json.dumps(entry) + "\n")
@@ -126,12 +138,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(n).decode() if n else ""
+        raw_bytes = self.rfile.read(n) if n else b""
+        raw = raw_bytes.decode("utf-8", "replace")
         try:
             body = json.loads(raw) if raw else None
         except ValueError:
             body = raw
-        self._record(body)
+        self._record(body, raw)
         if not self._auth_ok():
             self._send(401, {"error": "unauthorized", "message": "missing or invalid API key"})
             return
@@ -145,11 +158,25 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/v1/events":
             self._events(m, body)
         elif self.path == "/api/v1/submissions/processed":
+            if m == "processed_bad":
+                # A 200 that is not the documented classification shape.
+                self._send(200, {"ok": True})
+                return
+            want = bool(body.get("processed", True))
+            updated, unchanged, not_found = [], [], []
+            for i in body.get("ids", []):
+                if i not in KNOWN_IDS:
+                    not_found.append(i)
+                elif MARKED.get(i, False) == want:
+                    unchanged.append(i)
+                else:
+                    MARKED[i] = want
+                    updated.append(i)
             out = {
-                "processed": body.get("processed", True),
-                "updated": body.get("ids", []),
-                "unchanged": [],
-                "not_found": [],
+                "processed": want,
+                "updated": updated,
+                "unchanged": unchanged,
+                "not_found": not_found,
             }
             if "resolution" in body:
                 out["resolution"] = body["resolution"]
@@ -199,6 +226,12 @@ class Handler(BaseHTTPRequestHandler):
         elif m == "review_bad_created":
             # A 201 that proves nothing: the id is not a positive integer.
             self._send(201, dict(echo, id="102"))
+        elif m == "review_wrong_type":
+            # Right run, right family, but the record is filed under another
+            # skill: the receipt does not prove OUR submission was stored.
+            self._send(201, dict(echo, submission_type="some-other-skill"))
+        elif m == "review_unparseable":
+            self._send_raw(201, b"not json at all", "application/json")
         elif m == "replay200":
             self._send(200, echo)
         elif m == "mismatch409":
@@ -217,6 +250,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": "internal", "message": "boom"})
 
     def _events(self, m, body):
+        if m == "event_bad_created":
+            self._send(201, {"id": "not-a-number", "family": "event",
+                             "submission_type": body.get("kind"),
+                             "run_id": body.get("key"),
+                             "machine_name": body.get("machine_name")})
+            return
+        if m == "event_unparseable":
+            self._send_raw(201, b"{not json", "application/json")
+            return
+        if m == "event_collision":
+            self._send(200, {"id": 9, "family": "event",
+                             "submission_type": body.get("kind"),
+                             "run_id": "someone-elses-key",
+                             "machine_name": "other-machine"})
+            return
         if m == "reject400":
             self._send(400, {"error": "create_event_failed",
                              "message": "invalid input: kind is required"})
@@ -272,6 +320,10 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self._send(400, {"error": "bad_request", "message": "id must be numeric"})
                 return
+            if wanted not in KNOWN_IDS:
+                self._send(404, {"error": "not_found",
+                                 "message": "submission %d not found" % wanted})
+                return
             self._send(200, full_row(wanted))
         elif parsed.path == "/api/v1/submissions":
             self._list(parse_qs(parsed.query))
@@ -313,6 +365,14 @@ class Handler(BaseHTTPRequestHandler):
             ids = ids[offset:]
         page = ids[:limit]
         has_more = len(ids) > len(page)
+        if mode() == "pagination_bad":
+            # has_more with no usable cursor: following it would silently
+            # truncate the queue.
+            self._send(200, {"submissions": [full_row(i) if include_payload
+                                             else summary_row(i) for i in page],
+                             "limit": limit, "offset": offset, "total": total,
+                             "has_more": True, "next_before_id": None})
+            return
         rows = [full_row(i) if include_payload else summary_row(i) for i in page]
         self._send(200, {
             "submissions": rows,
@@ -324,14 +384,21 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _export(self, q):
-        total = list_rows()
+        m = mode()
+        if m == "export_http_500":
+            self._send(500, {"error": "internal", "message": "export blew up"})
+            return
+        total = 0 if m == "export_empty" else list_rows()
         family = q.get("family", [None])[0]
         since = q.get("since", [None])[0]
-        header = json.dumps({"export_format": 1, "family": family, "since": since,
-                             "exported_at": "2026-07-30T00:00:00.000000Z"})
+        if m == "export_bad_header":
+            header = json.dumps({"submissions": "this is not an export header"})
+        else:
+            header = json.dumps({"export_format": 1, "family": family, "since": since,
+                                 "exported_at": "2026-07-30T00:00:00.000000Z"})
         records = "".join(json.dumps(full_row(i)) + "\n" for i in range(1, total + 1))
         out = header + "\n" + records
-        if mode() != "export_no_terminator":
+        if m != "export_no_terminator":
             digest = hashlib.sha256(records.encode()).hexdigest()
             out += json.dumps({"export_complete": True, "count": total,
                                "sha256": digest}) + "\n"
