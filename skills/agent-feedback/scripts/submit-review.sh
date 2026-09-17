@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Submit a completed review run (multi-llm-review / second-opinion) to the
-# agent-feedback service — timings + scorecard by default, raw outputs only
-# with --include-outputs.
+# Submit a completed multi-reviewer run to the agent-feedback service —
+# timings + scorecard by default, raw outputs only with --include-outputs.
 #
 # Usage:
 #   submit-review.sh <run_dir> [--include-outputs]

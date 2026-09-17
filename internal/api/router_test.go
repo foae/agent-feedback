@@ -139,7 +139,7 @@ func TestRouter_FullFlow(t *testing.T) {
 	}
 
 	// Review: created, replayed, mismatched.
-	review := `{"skill":"multi-llm-review","machine_name":"workstation-a","coordinator_model":"claude-fable-5",` +
+	review := `{"skill":"review-panel","machine_name":"workstation-a","coordinator_model":"claude-fable-5",` +
 		`"run_id":"run-1","reviewers":[{"slot":"a","model":"m","status":"completed"}]}`
 	status, body = do(t, srv, http.MethodPost, "/api/v1/reviews", review, true)
 	if status != http.StatusCreated {
@@ -184,7 +184,7 @@ func TestRouter_FullFlow(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("kind=friction must be rejected: status %d", status)
 	}
-	status, _ = do(t, srv, http.MethodPost, "/api/v1/reviews", strings.Replace(review, `"multi-llm-review"`, `"friction"`, 1), true)
+	status, _ = do(t, srv, http.MethodPost, "/api/v1/reviews", strings.Replace(review, `"review-panel"`, `"friction"`, 1), true)
 	if status != http.StatusBadRequest {
 		t.Fatalf("skill=friction must be rejected: status %d", status)
 	}

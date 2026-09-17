@@ -55,6 +55,11 @@ chk() { # chk <desc> <ok 0|1>
 }
 set_mode() { printf '%s' "$1" >"$STATE/mode"; }
 set_list_rows() { printf '%s' "$1" >"$STATE/list_rows"; }
+# Cap the rows the mock returns per list page, so paging can be exercised with
+# a handful of rows instead of hundreds. 0 removes the cap.
+set_list_page_cap() {
+  if [ "$1" = 0 ]; then rm -f "$STATE/list_page_cap"; else printf '%s' "$1" >"$STATE/list_page_cap"; fi
+}
 # Portable mtime setter: `touch -d '8 days ago'` is GNU-only.
 set_mtime() { # <path> <seconds ago>
   python3 -c 'import os,sys,time; p=sys.argv[1]; t=time.time()-float(sys.argv[2]); os.utime(p,(t,t))' "$1" "$2"
@@ -496,12 +501,12 @@ chk "event --dry-run -> valid, no request" "$(jq -n --arg last "$(outcome "$out"
 # ── submit-review.sh ─────────────────────────────────────────────────────────
 
 # fixture run dir
-RUN_BASE="$HOME/.cache/multi-llm-review"
+RUN_BASE="$HOME/.cache/review-panel"
 RUN_DIR="$RUN_BASE/20260730-101010-4242"
 mkdir -p "$RUN_DIR"
 export AGENT_FEEDBACK_REVIEW_DIRS="$RUN_BASE"
 cat >"$RUN_DIR/meta.json" <<'JSON'
-{"machine":"testmach","skill":"multi-llm-review","run_ts":"20260730-101010",
+{"machine":"testmach","skill":"review-panel","run_ts":"20260730-101010",
  "caller":"claude-fable-5",
  "slots":{"gpt56":{"label":"GPT-5.6-Sol"},"kimi":{"label":"Kimi-K3"}}}
 JSON
@@ -592,7 +597,7 @@ chk "review replay 200 -> duplicate, exit 0" "$(jq -n --arg o "$o" --argjson rc 
 RUN_OPTIONAL="$RUN_BASE/20260730-202020-optional"
 mkdir -p "$RUN_OPTIONAL"
 cat >"$RUN_OPTIONAL/meta.json" <<'JSON'
-{"machine":"testmach","skill":"multi-llm-review","run_ts":"20260730-202020",
+{"machine":"testmach","skill":"review-panel","run_ts":"20260730-202020",
  "caller":"original-caller-model","slots":{"one":{"label":"Optional Counts"}}}
 JSON
 printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$RUN_OPTIONAL/summary.tsv"
@@ -613,7 +618,7 @@ chk "review keeps score with blank optional counts, tabs, and original caller" "
 RUN_PENDING="$RUN_BASE/20200101-000000-pending"
 mkdir -p "$RUN_PENDING"
 cat >"$RUN_PENDING/meta.json" <<'JSON'
-{"machine":"testmach","skill":"multi-llm-review","run_ts":"20200101-000000",
+{"machine":"testmach","skill":"review-panel","run_ts":"20200101-000000",
  "caller":"caller","slots":{"one":{"label":"Pending Grade"}}}
 JSON
 printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$RUN_PENDING/summary.tsv"
@@ -628,7 +633,7 @@ chk "direct review refuses PENDING scorecard without request or marker" \
 RUN_MISSING="$RUN_BASE/20200101-000001-missing"
 mkdir -p "$RUN_MISSING"
 cat >"$RUN_MISSING/meta.json" <<'JSON'
-{"machine":"testmach","skill":"multi-llm-review","run_ts":"20200101-000001",
+{"machine":"testmach","skill":"review-panel","run_ts":"20200101-000001",
  "caller":"caller","slots":{"one":{"label":"Missing Grade"}}}
 JSON
 printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$RUN_MISSING/summary.tsv"
@@ -643,7 +648,7 @@ RUN_AMBIG_B="$RUN_BASE/20200101-000002-b"
 mkdir -p "$RUN_AMBIG_A" "$RUN_AMBIG_B"
 for run in "$RUN_AMBIG_A" "$RUN_AMBIG_B"; do
   cat >"$run/meta.json" <<'JSON'
-{"machine":"testmach","skill":"multi-llm-review","run_ts":"20200101-000002",
+{"machine":"testmach","skill":"review-panel","run_ts":"20200101-000002",
  "caller":"caller","slots":{"one":{"label":"Shared Timestamp"}}}
 JSON
   printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$run/summary.tsv"
@@ -659,7 +664,7 @@ chk "ambiguous timestamp refuses score borrowing without request or marker" \
 RUN_SWEEP="$RUN_BASE/20200101-000003-sweepable"
 mkdir -p "$RUN_SWEEP"
 cat >"$RUN_SWEEP/meta.json" <<'JSON'
-{"machine":"testmach","skill":"multi-llm-review","run_ts":"20200101-000003",
+{"machine":"testmach","skill":"review-panel","run_ts":"20200101-000003",
  "caller":"caller","slots":{"one":{"label":"Sweepable"}}}
 JSON
 printf 'slot\tmodel\tstatus\tduration_s\tbytes\none\tmodel/one\tcompleted\t1\t2\n' >"$RUN_SWEEP/summary.tsv"
@@ -810,10 +815,10 @@ chk "list --include-processed drops the filter; --all errors pointing at it" \
 set_list_rows 1
 
 # 17d. family/type/machine filters reach the server
-bash "$SCRIPTS/process.sh" list --family review --type multi-llm-review --machine other >/dev/null 2>&1
+bash "$SCRIPTS/process.sh" list --family review --type review-panel --machine other >/dev/null 2>&1
 req=$(last_req)
 chk "process list passes family/type/machine" "$(jq -r '
-  if (.path|test("family=review")) and (.path|test("type=multi-llm-review"))
+  if (.path|test("family=review")) and (.path|test("type=review-panel"))
   and (.path|test("machine=other")) then 1 else 0 end' <<<"$req")"
 
 # 18. done: batch mark with a resolution, outcome echoed verbatim
@@ -846,6 +851,60 @@ chk "process undo -> processed:false without resolution" "$(jq -r '
 # 20. non-numeric id dies
 bash "$SCRIPTS/process.sh" done abc >/dev/null 2>&1
 chk "process done abc -> exit 1" "$([ $? != 0 ] && echo 1 || echo 0)"
+
+# ── feedback-triage digest.sh ────────────────────────────────────────────────
+
+TRIAGE_SCRIPTS="$TESTS_DIR/../../skills/feedback-triage/scripts"
+
+# 21. happy path: 3 unprocessed frictions served across two pages.
+set_list_rows 3
+set_list_page_cap 2
+before=$(log_len)
+out=$(bash "$TRIAGE_SCRIPTS/digest.sh" --out "$WORK/digest1" 2>"$WORK/digest1.err")
+rc=$?
+dir=$(outcome "$out")
+gets=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.method=="GET") | 1' | wc -l | tr -d ' ')
+cursors=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.path|test("before_id=")) | 1' | wc -l | tr -d ' ')
+payload_q=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.path|test("include=payload")) | 1' | wc -l | tr -d ' ')
+chk "digest pages through 3 rows in 2 requests with include=payload" \
+  "$([ "$rc" = 0 ] && [ "$gets" = 2 ] && [ "$cursors" = 1 ] && [ "$payload_q" = 2 ] && echo 1 || echo 0)"
+chk "digest prints its directory as the last stdout line" \
+  "$([ "$dir" = "$WORK/digest1" ] && [ -d "$dir" ] && echo 1 || echo 0)"
+chk "digest writes one <id>.json per row" \
+  "$([ -f "$WORK/digest1/1.json" ] && [ -f "$WORK/digest1/2.json" ] && [ -f "$WORK/digest1/3.json" ] && echo 1 || echo 0)"
+chk "digest index.json holds every pulled row with its payload" "$(jq -r '
+  if length==3 and ([.[].id]|sort)==[1,2,3]
+     and (map(select(.payload.summary|startswith("fixture summary")))|length)==3
+  then 1 else 0 end' "$WORK/digest1/index.json" 2>/dev/null || echo 0)"
+md=$(cat "$WORK/digest1/digest.md" 2>/dev/null || true)
+case "$md" in *"## project:"*) md_project=1 ;; *) md_project=0 ;; esac
+case "$md" in *"### tooling"*) md_category=1 ;; *) md_category=0 ;; esac
+case "$md" in *"#1"*) md_1=1 ;; *) md_1=0 ;; esac
+case "$md" in *"#2"*) md_2=1 ;; *) md_2=0 ;; esac
+case "$md" in *"#3"*) md_3=1 ;; *) md_3=0 ;; esac
+case "$md" in *"pulled: 3"*) md_count=1 ;; *) md_count=0 ;; esac
+chk "digest.md has project/category headings, every id, and pulled: 3" \
+  "$([ "$md_project" = 1 ] && [ "$md_category" = 1 ] && [ "$md_count" = 1 ] \
+     && [ "$md_1" = 1 ] && [ "$md_2" = 1 ] && [ "$md_3" = 1 ] && echo 1 || echo 0)"
+set_list_page_cap 0
+
+# 22. service unreachable -> exit 1, nothing on stdout
+out=$(env AGENT_FEEDBACK_URL="http://127.0.0.1:1" bash "$TRIAGE_SCRIPTS/digest.sh" \
+  --out "$WORK/digest2" 2>"$WORK/digest2.err")
+rc=$?
+chk "digest on an unreachable service -> exit 1, no directory on stdout" \
+  "$([ "$rc" = 1 ] && [ -z "$out" ] && echo 1 || echo 0)"
+
+# 23. empty queue -> exit 0 and a digest reporting pulled: 0
+set_list_rows 0
+out=$(bash "$TRIAGE_SCRIPTS/digest.sh" --out "$WORK/digest3" 2>"$WORK/digest3.err")
+rc=$?
+dir=$(outcome "$out")
+md=$(cat "$WORK/digest3/digest.md" 2>/dev/null || true)
+case "$md" in *"pulled: 0"*) md_count=1 ;; *) md_count=0 ;; esac
+chk "digest on an empty queue -> exit 0, digest.md reports pulled: 0" \
+  "$([ "$rc" = 0 ] && [ "$dir" = "$WORK/digest3" ] && [ "$md_count" = 1 ] && echo 1 || echo 0)"
+set_list_rows 1
 
 echo
 echo "skill tests: $pass passed, $fail failed"

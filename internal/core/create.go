@@ -64,8 +64,8 @@ func validateContext(ctx map[string]string) error {
 	return nil
 }
 
-// CreateReview validates and stores a review submission (multi-llm-review,
-// second-opinion, ...).
+// CreateReview validates and stores a review submission (review-panel,
+// plan-review, ...).
 //
 // Idempotent on (skill, run_id): replaying identical content returns the
 // existing row with replayed=true; replaying different content under the same

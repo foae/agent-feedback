@@ -17,7 +17,7 @@ func TestDecodeRequestBodyRejectsTrailingJSONValues(t *testing.T) {
 	}{
 		{
 			name: "review",
-			body: `{"skill":"multi-llm-review","machine_name":"machine","coordinator_model":"model","run_id":"run","reviewers":[]} {}`,
+			body: `{"skill":"review-panel","machine_name":"machine","coordinator_model":"model","run_id":"run","reviewers":[]} {}`,
 			dst:  &CreateReviewRequest{},
 		},
 		{
