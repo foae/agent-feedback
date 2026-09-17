@@ -176,6 +176,15 @@ re-validating.
 Final report: processed/total, per-cluster outcome, commits made, TODOs
 created, new frictions filed, ids left open and why.
 
+## Uninstall
+
+Delete this directory (or its link) from every harness's skills location. It
+keeps no state of its own beyond digest directories under
+`${TMPDIR:-/tmp}/feedback-triage/`, which can be removed at any time. The
+sibling `agent-feedback` skill and the service have their own uninstall
+steps (`agent-feedback/SKILL.md`, `docs/operate.md#uninstall` in the
+repository).
+
 ## Related
 
 - Submit and query: the sibling [`agent-feedback`](../agent-feedback/SKILL.md) skill.
