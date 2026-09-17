@@ -45,4 +45,3 @@ func (c *Client) Close() {
 func (c *Client) Pool() *pgxpool.Pool {
 	return c.pg
 }
-
