@@ -190,6 +190,13 @@ n_spool=$(find "$SPOOL" -name 'friction-*.json' 2>/dev/null | wc -l | tr -d ' ')
 chk "friction connect fail -> spooled, exit 0" "$(jq -n --arg o "$o" --argjson rc "$rc" --argjson n "$n_spool" \
   '($o|fromjson) as $j | if $j.status=="spooled" and $rc==0 and $n==1 then 1 else 0 end')"
 
+# 7-perm. The spool holds unsent prose and repo paths: user-only, both the
+# directory (700) and every payload file (600).
+mode_of() { python3 -c 'import os,stat,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$1"; }
+spool_file=$(find "$SPOOL" -name 'friction-*.json' | head -n1)
+chk "spool directory is 0700 and spooled payloads are 0600" \
+  "$([ "$(mode_of "$SPOOL")" = "0o700" ] && [ "$(mode_of "$spool_file")" = "0o600" ] && echo 1 || echo 0)"
+
 export AGENT_FEEDBACK_URL="$saved_url"
 before=$(log_len)
 out=$(bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "online again" --model m 2>/dev/null)
@@ -261,7 +268,7 @@ for ((i = 1; i <= $#; i++)); do
   fi
   prev="$arg"
 done
-printf '{"id":101,"family":"friction","submission_type":"friction"}' >"$out"
+printf '{"id":101,"family":"friction","submission_type":"friction","machine_name":"testmach"}' >"$out"
 printf 201
 SH
 chmod +x "$FAKE_BIN/curl"
@@ -785,21 +792,23 @@ chk "process list -> processed=false, TSV row with family, total on stderr" "$(j
 # 17a. list follows next_before_id across every page (500 rows per page)
 set_list_rows 1200
 before=$(log_len)
-out=$(bash "$SCRIPTS/process.sh" list --json 2>"$WORK/list2.err")
+# The merged result is hundreds of KB: it goes to jq via --rawfile, never
+# --arg (capped at 128 KiB per argument on Linux).
+bash "$SCRIPTS/process.sh" list --json >"$WORK/list2.out" 2>"$WORK/list2.err"
 gets=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.method=="GET") | 1' | wc -l | tr -d ' ')
 cursors=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.path|test("before_id=")) | 1' | wc -l | tr -d ' ')
 case "$(cat "$WORK/list2.err")" in *"total: 1200"*) total_shown=1 ;; *) total_shown=0 ;; esac
 chk "process list pages through 1200 rows in 3 requests, merged --json, total" "$(jq -n \
-  --arg o "$out" --argjson gets "$gets" --argjson cursors "$cursors" --argjson t "$total_shown" \
+  --rawfile o "$WORK/list2.out" --argjson gets "$gets" --argjson cursors "$cursors" --argjson t "$total_shown" \
   '($o|fromjson) as $j |
    if ($j.submissions|length)==1200 and $j.total==1200 and $j.submissions[0].id==1200
       and $j.submissions[1199].id==1 and $gets==3 and $cursors==2 and $t==1 then 1 else 0 end')"
 
 # 17b. --limit caps the total rows returned across pages
 before=$(log_len)
-out=$(bash "$SCRIPTS/process.sh" list --limit 600 --json 2>/dev/null)
+bash "$SCRIPTS/process.sh" list --limit 600 --json >"$WORK/list3.out" 2>/dev/null
 gets=$(tail -n +"$((before+1))" "$STATE/requests.jsonl" | jq -r 'select(.method=="GET") | 1' | wc -l | tr -d ' ')
-chk "process list --limit caps the whole result, not one page" "$(jq -n --arg o "$out" --argjson gets "$gets" \
+chk "process list --limit caps the whole result, not one page" "$(jq -n --rawfile o "$WORK/list3.out" --argjson gets "$gets" \
   '($o|fromjson) as $j | if ($j.submissions|length)==600 and $gets==2 then 1 else 0 end')"
 
 # 17c. --include-processed drops the processed filter; --all is a hard error
@@ -905,6 +914,320 @@ case "$md" in *"pulled: 0"*) md_count=1 ;; *) md_count=0 ;; esac
 chk "digest on an empty queue -> exit 0, digest.md reports pulled: 0" \
   "$([ "$rc" = 0 ] && [ "$dir" = "$WORK/digest3" ] && [ "$md_count" = 1 ] && echo 1 || echo 0)"
 set_list_rows 1
+
+# ── outcome discipline on failure paths ──────────────────────────────────────
+
+set_mode created
+set_list_rows 1
+rm -f "$SPOOL"/* 2>/dev/null || true
+
+# 24. Every exit path ends with exactly one machine-readable outcome line:
+# "error" for configuration/transport/HTTP failures, "rejected" for local
+# validation failures.
+before=$(log_len)
+out=$(env -u AGENT_FEEDBACK_API_KEY bash "$SCRIPTS/query.sh" --type friction 2>/dev/null)
+rc=$?
+o=$(outcome "$out")
+key_ok=$(jq -n --arg o "$o" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="error" and ($j.message|test("API_KEY")) and $rc==1 then 1 else 0 end')
+chk "missing API key -> error outcome, exit 1, no request" \
+  "$([ "$key_ok" = 1 ] && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
+
+before=$(log_len)
+out=$(bash "$SCRIPTS/query.sh" --bogus x 2>/dev/null); rc=$?
+q_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("unknown flag")) and $rc==1 then 1 else 0 end')
+out=$(bash "$SCRIPTS/submit-friction.sh" --category tooling --summary s --model m --bogus 2>/dev/null); rc=$?
+f_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("unknown flag")) and $rc==1 then 1 else 0 end')
+out=$(bash "$SCRIPTS/process.sh" list --bogus 2>/dev/null); rc=$?
+p_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and $rc==1 then 1 else 0 end')
+chk "unknown flags -> rejected outcome everywhere, exit 1, no request" \
+  "$([ "$q_ok" = 1 ] && [ "$f_ok" = 1 ] && [ "$p_ok" = 1 ] && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
+
+out=$(env AGENT_FEEDBACK_URL="http://127.0.0.1:1" bash "$SCRIPTS/process.sh" list 2>/dev/null); rc=$?
+list_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="error" and ($j.message|test("unreachable")) and $rc==1 then 1 else 0 end')
+out=$(env AGENT_FEEDBACK_URL="http://127.0.0.1:1" bash "$SCRIPTS/process.sh" done 43 2>/dev/null); rc=$?
+done_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="error" and ($j.message|test("unreachable")) and $rc==1 then 1 else 0 end')
+chk "process.sh on an unreachable service -> error outcome, exit 1" \
+  "$([ "$list_ok" = 1 ] && [ "$done_ok" = 1 ] && echo 1 || echo 0)"
+rm -f "$SPOOL"/* 2>/dev/null || true
+
+# 25. A 200 that is not the documented classification shape is not an answer.
+set_mode processed_bad
+out=$(bash "$SCRIPTS/process.sh" done 43 2>/dev/null); rc=$?
+chk "process done with a malformed 200 -> error outcome, exit 1" "$(jq -n \
+  --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="error" and ($j.message|test("malformed")) and $rc==1 then 1 else 0 end')"
+set_mode created
+
+# ── receipt validation: family AND type, and malformed is never a collision ──
+
+# 26. A 201 filed under a different skill proves nothing: retry, do not claim.
+rm -f "$RUN_DIR/.submitted"
+rm -f "$SPOOL"/* 2>/dev/null || true
+set_mode review_wrong_type
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_DIR" 2>/dev/null); rc=$?
+n_spool=$(find "$SPOOL" -name 'review-*.json' 2>/dev/null | wc -l | tr -d ' ')
+chk "review 201 under a foreign submission_type -> spooled, not acknowledged" "$(jq -n \
+  --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson n "$n_spool" \
+  --argjson marked "$([ -e "$RUN_DIR/.submitted" ] && echo 1 || echo 0)" \
+  '($o|fromjson) as $j |
+   if $j.status=="spooled" and $j.reason=="malformed_success_response" and $rc==0
+      and $n==1 and $marked==0 then 1 else 0 end')"
+
+# 27. An unparseable 2xx body is a malformed success, NEVER a collision: it is
+# retryable in both the direct and the flush path.
+set_mode review_unparseable
+bash "$SCRIPTS/query.sh" --family review --flush >/dev/null 2>&1
+retained=$(find "$SPOOL" \( -name 'review-*.json' -o -name 'review-*.inflight' \) 2>/dev/null | wc -l | tr -d ' ')
+rejected=$(find "$SPOOL" -name 'review-*.rejected' 2>/dev/null | wc -l | tr -d ' ')
+rm -f "$SPOOL"/* 2>/dev/null || true
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_DIR" 2>/dev/null); rc=$?
+direct=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="spooled" and $j.reason=="malformed_success_response" and $rc==0 then 1 else 0 end')
+chk "unparseable review 2xx is retryable (direct + flush), never a collision" \
+  "$([ "$retained" = 1 ] && [ "$rejected" = 0 ] && [ "$direct" = 1 ] && echo 1 || echo 0)"
+set_mode created
+bash "$SCRIPTS/query.sh" --family review --flush >/dev/null 2>&1
+rm -f "$SPOOL"/* "$RUN_DIR/.submitted" 2>/dev/null || true
+
+# 28. The same distinction for events: a non-integer id is malformed (spool), a
+# record naming a different key/machine is a collision (exit 1, no spool).
+set_mode event_bad_created
+out=$(printf '%s' '{"a":1}' | bash "$SCRIPTS/submit-event.sh" --kind deploy --key mal-key --stdin --model m 2>/dev/null); rc=$?
+n_spool=$(find "$SPOOL" -name 'event-*.json' 2>/dev/null | wc -l | tr -d ' ')
+bad_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson n "$n_spool" '($o|fromjson) as $j |
+  if $j.status=="spooled" and $j.reason=="malformed_success_response" and $rc==0 and $n==1 then 1 else 0 end')
+rm -f "$SPOOL"/* 2>/dev/null || true
+set_mode event_unparseable
+out=$(printf '%s' '{"a":1}' | bash "$SCRIPTS/submit-event.sh" --kind deploy --key mal-key2 --stdin --model m 2>/dev/null); rc=$?
+n_spool=$(find "$SPOOL" -name 'event-*.json' 2>/dev/null | wc -l | tr -d ' ')
+unp_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson n "$n_spool" '($o|fromjson) as $j |
+  if $j.status=="spooled" and $j.reason=="malformed_success_response" and $rc==0 and $n==1 then 1 else 0 end')
+rm -f "$SPOOL"/* 2>/dev/null || true
+set_mode event_collision
+out=$(printf '%s' '{"a":1}' | bash "$SCRIPTS/submit-event.sh" --kind deploy --key coll-key --stdin --model m 2>/dev/null); rc=$?
+n_spool=$(find "$SPOOL" -name 'event-*' 2>/dev/null | wc -l | tr -d ' ')
+coll_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson n "$n_spool" '($o|fromjson) as $j |
+  if $j.status=="collision" and $j.key=="coll-key" and $rc==1 and $n==0 then 1 else 0 end')
+chk "event receipts: malformed -> spooled, foreign record -> collision" \
+  "$([ "$bad_ok" = 1 ] && [ "$unp_ok" = 1 ] && [ "$coll_ok" = 1 ] && echo 1 || echo 0)"
+set_mode created
+rm -f "$SPOOL"/* 2>/dev/null || true
+
+# 29. A 401 is a fixable configuration problem, not a payload problem: the
+# spooled file stays retryable instead of being parked as .rejected.
+export AGENT_FEEDBACK_URL="http://127.0.0.1:1"
+bash "$SCRIPTS/submit-friction.sh" --category tooling --summary "401 retry" --model m >/dev/null 2>&1
+export AGENT_FEEDBACK_URL="$saved_url"
+AGENT_FEEDBACK_API_KEY="wrongkey" bash "$SCRIPTS/query.sh" --type friction --flush >/dev/null 2>&1
+retryable=$(find "$SPOOL" -name 'friction-*.json' 2>/dev/null | wc -l | tr -d ' ')
+rejected=$(find "$SPOOL" -name 'friction-*.rejected' 2>/dev/null | wc -l | tr -d ' ')
+bash "$SCRIPTS/query.sh" --type friction --flush >/dev/null 2>&1
+left=$(find "$SPOOL" -name 'friction-*' 2>/dev/null | wc -l | tr -d ' ')
+chk "flush keeps a 401-refused payload retryable and delivers it once the key works" \
+  "$([ "$retryable" = 1 ] && [ "$rejected" = 0 ] && [ "$left" = 0 ] && echo 1 || echo 0)"
+
+# ── pagination guards ────────────────────────────────────────────────────────
+
+# 30. has_more with no usable cursor must stop loudly, never return a silently
+# truncated queue.
+set_mode pagination_bad
+set_list_rows 5
+set_list_page_cap 2
+out=$(bash "$SCRIPTS/process.sh" list 2>/dev/null); rc=$?
+list_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="error" and $j.message=="malformed pagination response" and $rc==1 then 1 else 0 end')
+out=$(bash "$TRIAGE_SCRIPTS/digest.sh" --out "$WORK/digest-badpage" 2>/dev/null); rc=$?
+digest_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="error" and $j.message=="malformed pagination response" and $rc==1 then 1 else 0 end')
+chk "malformed pagination stops process.sh list and digest.sh with an error outcome" \
+  "$([ "$list_ok" = 1 ] && [ "$digest_ok" = 1 ] && echo 1 || echo 0)"
+set_mode created
+set_list_page_cap 0
+set_list_rows 1
+
+# ── temp-file hygiene ────────────────────────────────────────────────────────
+
+# 31. EXIT traps must not reference function-local paths: a trap firing after
+# the function returned expands them to "" and leaves the temp file behind.
+# TMPDIR is set for GNU mktemp; macOS mktemp ignores it and uses the Darwin
+# per-user temp dir, so the check is a before/after snapshot of whichever
+# directory mktemp actually writes to.
+PRIV_TMP="$WORK/private-tmp"
+mkdir -p "$PRIV_TMP"
+TMP_ROOT=$(dirname "$(TMPDIR="$PRIV_TMP" mktemp -u)")
+tmp_entries() { find "$TMP_ROOT" "$PRIV_TMP" -maxdepth 1 -mindepth 1 2>/dev/null | sort; }
+tmp_before=$(tmp_entries)
+set_list_rows 3
+TMPDIR="$PRIV_TMP" bash "$SCRIPTS/query.sh" export >/dev/null 2>&1
+TMPDIR="$PRIV_TMP" bash "$SCRIPTS/process.sh" list >/dev/null 2>&1
+TMPDIR="$PRIV_TMP" bash "$SCRIPTS/query.sh" 43 >/dev/null 2>&1
+leaked=$(comm -13 <(printf '%s\n' "$tmp_before") <(tmp_entries) | wc -l | tr -d ' ')
+chk "query.sh export / process.sh list leave no temp files behind" \
+  "$([ "$leaked" = 0 ] && echo 1 || echo 0)"
+set_list_rows 1
+
+# ── bash 3.2: possibly-empty arrays ──────────────────────────────────────────
+
+# 32. macOS ships bash 3.2, where "${ARR[@]}" on an empty array is an unbound
+# variable under `set -u`. Both of these expand an empty array.
+set_list_rows 2
+bash "$SCRIPTS/query.sh" export >/dev/null 2>&1; export_rc=$?
+bash "$SCRIPTS/process.sh" list --include-processed >/dev/null 2>&1; list_rc=$?
+chk "unfiltered export and unfiltered list run with empty parameter arrays" \
+  "$([ "$export_rc" = 0 ] && [ "$list_rc" = 0 ] && echo 1 || echo 0)"
+set_list_rows 1
+
+# ── export verification ──────────────────────────────────────────────────────
+
+# 33. An HTTP error is not an export: nothing but the outcome on stdout.
+set_mode export_http_500
+out=$(bash "$SCRIPTS/query.sh" export 2>/dev/null); rc=$?
+chk "export HTTP 500 -> error outcome, exit 1, no NDJSON on stdout" "$(jq -n \
+  --arg o "$out" --argjson rc "$rc" \
+  '($o|fromjson) as $j | if $j.status=="error" and ($j.message|test("HTTP 500")) and $rc==1 then 1 else 0 end')"
+
+# 34. An empty export (header + terminator, count 0) verifies successfully.
+set_mode export_empty
+out=$(bash "$SCRIPTS/query.sh" export 2>"$WORK/export3.err"); rc=$?
+lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+term_ok=$(printf '%s\n' "$out" | tail -n1 | jq -r 'if .export_complete==true and .count==0 then 1 else 0 end')
+case "$(cat "$WORK/export3.err")" in *"export verified: 0 record(s)"*) verified=1 ;; *) verified=0 ;; esac
+chk "empty export verifies (exit 0), verification goes to stderr only" \
+  "$([ "$rc" = 0 ] && [ "$lines" = 2 ] && [ "$term_ok" = 1 ] && [ "$verified" = 1 ] && echo 1 || echo 0)"
+
+# 35. A stream that does not start with an export header is not an export.
+set_mode export_bad_header
+set_list_rows 2
+out=$(bash "$SCRIPTS/query.sh" export 2>"$WORK/export4.err"); rc=$?
+case "$(cat "$WORK/export4.err")" in *"export_format"*) warned=1 ;; *) warned=0 ;; esac
+chk "export with a bad header line -> exit 1 and a stderr warning" \
+  "$([ "$rc" = 1 ] && [ "$warned" = 1 ] && echo 1 || echo 0)"
+set_mode created
+set_list_rows 1
+
+# ── submit-event.sh: byte-for-byte payload forwarding ────────────────────────
+
+# 36. Number spelling and key order are part of the payload: the bytes the
+# caller handed over are the bytes the server receives.
+VERBATIM='{"z":1.0,"a":1e0,"big":12345678901234567890,"nested":{"b":2},"t":true}'
+printf '%s' "$VERBATIM" >"$WORK/verbatim.json"
+bash "$SCRIPTS/submit-event.sh" --kind bench --key verbatim-1 \
+  --payload-file "$WORK/verbatim.json" --model m >/dev/null 2>&1
+raw=$(last_req | jq -r '.raw')
+case "$raw" in
+  *"\"payload\":$VERBATIM"*) verbatim_ok=1 ;;
+  *) verbatim_ok=0 ;;
+esac
+chk "event payload reaches the server byte-identical (1.0, 1e0, big integers, key order)" \
+  "$verbatim_ok"
+
+# 37. A concatenated stream of JSON documents is a mistake, not a payload.
+before=$(log_len)
+out=$(printf '%s' '{"a":1}{"b":2}' | bash "$SCRIPTS/submit-event.sh" --kind bench --stdin --model m 2>/dev/null); rc=$?
+ev_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and $rc==1 then 1 else 0 end')
+out=$(printf '%s\n%s\n' '{"category":"tooling","summary":"one"}' '{"category":"tooling","summary":"two"}' \
+  | bash "$SCRIPTS/submit-friction.sh" --stdin --model m 2>/dev/null); rc=$?
+fr_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="rejected" and ($j.message|test("single JSON object")) and $rc==1 then 1 else 0 end')
+chk "multi-document --stdin input rejected for events and frictions, no request" \
+  "$([ "$ev_ok" = 1 ] && [ "$fr_ok" = 1 ] && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
+
+# 38. The server's 10 MiB body limit is enforced locally, so an oversized
+# report costs no round trip.
+before=$(log_len)
+python3 -c '
+import json,sys
+json.dump({"category":"tooling","summary":"oversized","details":"D"*11010048}, sys.stdout)' \
+  >"$WORK/oversized.json"
+out=$(bash "$SCRIPTS/submit-friction.sh" --stdin --model m <"$WORK/oversized.json" 2>/dev/null); rc=$?
+chk "10.5 MiB friction -> rejected locally, no request" "$(jq -n \
+  --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
+  '($o|fromjson) as $j | if $j.status=="rejected" and ($j.message|test("10485760")) and $rc==1 and $b==$a then 1 else 0 end')"
+rm -f "$WORK/oversized.json"
+
+# ── submit-review.sh: TSV parsing, skips, flags ──────────────────────────────
+
+# 39. Tabs are IFS whitespace: a naive read collapses consecutive tabs (losing
+# an empty duration into the bytes column) and drops a final unterminated row.
+RUN_TSV="$RUN_BASE/20200101-000004-tsv"
+mkdir -p "$RUN_TSV"
+cat >"$RUN_TSV/meta.json" <<'JSON'
+{"machine":"testmach","skill":"review-panel","run_ts":"20200101-000004",
+ "caller":"caller","slots":{"one":{"label":"TSV Row"},"two":{"label":"TSV Row Two"}}}
+JSON
+printf 'slot\tmodel\tstatus\tduration_s\tbytes\n' >"$RUN_TSV/summary.tsv"
+printf 'one\tmodel/one\tcompleted\t\t2048\n' >>"$RUN_TSV/summary.tsv"
+printf 'two\tmodel/two\ttimeout\t12\t99' >>"$RUN_TSV/summary.tsv"   # no trailing newline
+printf '20200101-000004\tx\tTSV Row\t5\t1\t0\tok\n' >>"$RUN_BASE/scorecards.tsv"
+set_mode created
+bash "$SCRIPTS/submit-review.sh" "$RUN_TSV" >/dev/null 2>&1
+req=$(last_req)
+chk "review TSV keeps an empty duration in place and the final unterminated row" "$(jq -r '
+  if (.body.reviewers|length)==2
+  and .body.reviewers[0].slot=="one"
+  and (.body.reviewers[0]|has("duration_s")|not)
+  and .body.reviewers[0].bytes==2048
+  and .body.reviewers[1].slot=="two"
+  and .body.reviewers[1].duration_s==12 and .body.reviewers[1].bytes==99
+  then 1 else 0 end' <<<"$req")"
+
+# 40. Nothing to submit still ends with an outcome in direct mode.
+RUN_NOMETA="$RUN_BASE/20200101-000005-nometa"
+mkdir -p "$RUN_NOMETA"
+rm -f "$SPOOL"/* 2>/dev/null || true
+before=$(log_len)
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_NOMETA" 2>/dev/null); rc=$?
+nometa_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="skipped" and ($j.reason|test("meta.json")) and ($j.run_id|length>0) and $rc==1 then 1 else 0 end')
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_PENDING" 2>/dev/null); rc=$?
+pending_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="skipped" and ($j.reason|test("incomplete scorecard")) and $rc==1 then 1 else 0 end')
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_AMBIG_A" 2>/dev/null); rc=$?
+ambig_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
+  if $j.status=="skipped" and ($j.reason|test("ambiguous timestamp")) and $rc==1 then 1 else 0 end')
+chk "direct review skips end with a skipped outcome and send nothing" \
+  "$([ "$nometa_ok" = 1 ] && [ "$pending_ok" = 1 ] && [ "$ambig_ok" = 1 ] \
+     && [ "$(log_len)" -eq "$before" ] && echo 1 || echo 0)"
+
+# 40a. Sweep keeps warning per run and exiting 0.
+before=$(log_len)
+out=$(SWEEP_MIN_AGE_HOURS=0 bash "$SCRIPTS/submit-review.sh" --sweep 2>&1); rc=$?
+case "$out" in *"incomplete scorecard"*) swept_warn=1 ;; *) swept_warn=0 ;; esac
+chk "sweep still warns per run and exits 0" \
+  "$([ "$rc" = 0 ] && [ "$swept_warn" = 1 ] && echo 1 || echo 0)"
+
+# 41. A flag typo must never submit with the wrong options.
+before=$(log_len)
+out=$(bash "$SCRIPTS/submit-review.sh" "$RUN_DIR" --include-output 2>/dev/null); rc=$?
+chk "review unknown flag -> rejected outcome, exit 1, no request" "$(jq -n \
+  --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
+  '($o|fromjson) as $j | if $j.status=="rejected" and ($j.message|test("unknown flag")) and $rc==1 and $b==$a then 1 else 0 end')"
+
+# ── feedback-triage digest.sh output directory ───────────────────────────────
+
+# 42. Two digests in the same second must not land in the same directory, and
+# an existing non-empty --out is refused rather than mixed into.
+set_mode created
+set_list_rows 1
+DIGEST_TMP="$WORK/digest-tmp"
+mkdir -p "$DIGEST_TMP"
+d1=$(TMPDIR="$DIGEST_TMP" bash "$TRIAGE_SCRIPTS/digest.sh" 2>/dev/null | tail -n1)
+d2=$(TMPDIR="$DIGEST_TMP" bash "$TRIAGE_SCRIPTS/digest.sh" 2>/dev/null | tail -n1)
+out=$(bash "$TRIAGE_SCRIPTS/digest.sh" --out "$WORK/digest1" 2>&1); rc=$?
+case "$out" in *"not empty"*) refused=1 ;; *) refused=0 ;; esac
+chk "digest makes a fresh directory per run and refuses a non-empty --out" \
+  "$([ -n "$d1" ] && [ -n "$d2" ] && [ "$d1" != "$d2" ] && [ -d "$d1" ] && [ -d "$d2" ] \
+     && [ "$rc" != 0 ] && [ "$refused" = 1 ] && echo 1 || echo 0)"
+
+# 43. digest.sh is executable as shipped (it is invoked directly, not via bash).
+chk "digest.sh is executable" "$([ -x "$TRIAGE_SCRIPTS/digest.sh" ] && echo 1 || echo 0)"
 
 echo
 echo "skill tests: $pass passed, $fail failed"

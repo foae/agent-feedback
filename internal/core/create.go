@@ -262,6 +262,25 @@ func compactObject(raw []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// idempotencyKeyName is what the caller's request calls the key of a keyed
+// family: reviews send run_id, events send key. The error message has to name
+// the field the caller actually sent.
+func idempotencyKeyName(family string) string {
+	if family == store.FamilyEvent {
+		return "key"
+	}
+
+	return "run_id"
+}
+
+func replayMismatchError(family string, existingID int64) error {
+	name := idempotencyKeyName(family)
+
+	return fmt.Errorf(
+		"%w: %s already stored as submission %d with different content; submit the correction as a new submission (new %s)",
+		ErrReplayMismatch, name, existingID, name)
+}
+
 // createKeyed inserts a submission that carries an idempotency key, inside one
 // BEGIN IMMEDIATE transaction: the existence check and the insert cannot
 // interleave with a competing writer, so exactly one row results.
@@ -276,9 +295,7 @@ func (s *Service) createKeyed(ctx context.Context, sub store.Submission) (store.
 		switch {
 		case err == nil:
 			if existing.PayloadHash != sub.PayloadHash {
-				return fmt.Errorf(
-					"%w: run_id already stored as submission %d with different content; submit the correction as a new submission (new run_id)",
-					ErrReplayMismatch, existing.ID)
+				return replayMismatchError(sub.Family, existing.ID)
 			}
 			out, replayed = existing, true
 
@@ -297,8 +314,7 @@ func (s *Service) createKeyed(ctx context.Context, sub store.Submission) (store.
 				existing, getErr := store.GetSubmissionByKey(ctx, q, sub.Family, sub.SubmissionType, *sub.RunID)
 				if getErr == nil {
 					if existing.PayloadHash != sub.PayloadHash {
-						return fmt.Errorf("%w: run_id already stored as submission %d with different content; submit the correction as a new submission (new run_id)",
-							ErrReplayMismatch, existing.ID)
+						return replayMismatchError(sub.Family, existing.ID)
 					}
 					out, replayed = existing, true
 

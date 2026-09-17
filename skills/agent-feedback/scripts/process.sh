@@ -30,11 +30,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 AF_PAGE_SIZE=500
 
+# Local usage errors are a rejection, not a transport/HTTP error, and still end
+# the command with exactly one machine-readable outcome line.
 usage() {
   echo "usage: process.sh list [--family F] [--type T] [--machine M] [--include-processed] [--limit N] [--json]" >&2
   echo "       process.sh done <id> [<id>...] [--resolution \"what was done\"]" >&2
   echo "       process.sh undo <id> [<id>...]" >&2
-  exit 1
+  af_reject "${1:-invalid arguments (see usage above)}"
 }
 
 af_require_deps
@@ -47,13 +49,13 @@ set_processed() { # <true|false> <id...> [--resolution TEXT]
   while [ $# -gt 0 ]; do
     case "$1" in
       --resolution) resolution="${2:-}"; have_resolution=1; shift 2 ;;
-      -*) usage ;;
+      -*) usage "unknown flag: $1" ;;
       *) ids+=("$1"); shift ;;
     esac
   done
-  [ "${#ids[@]}" -gt 0 ] || usage
+  [ "${#ids[@]}" -gt 0 ] || usage "at least one submission id is required"
   if [ "$have_resolution" = 1 ]; then
-    [ "$processed" = true ] || af_die "--resolution is only valid with 'done' (the server rejects it when unmarking)"
+    [ "$processed" = true ] || af_reject "--resolution is only valid with 'done' (the server rejects it when unmarking)"
     resolution=$(af_trim "$resolution")
     [ -n "$resolution" ] || af_reject "--resolution must not be blank"
     af_check_summary "resolution" "$resolution"
@@ -61,15 +63,16 @@ set_processed() { # <true|false> <id...> [--resolution TEXT]
 
   local id ids_json="[]"
   for id in "${ids[@]}"; do
-    [[ "$id" =~ ^[0-9]+$ ]] || af_die "not a numeric submission id: $id"
+    [[ "$id" =~ ^[0-9]+$ ]] || af_reject "not a numeric submission id: $id"
     ids_json=$(jq -cn --argjson acc "$ids_json" --argjson id "$id" '$acc + [$id]')
   done
 
-  local payload
-  payload=$(mktemp)
-  # ${payload:-}: payload is local — by the time the EXIT trap fires it is out
-  # of scope, and set -u would abort the exit path on a bare "$payload".
-  trap 'rm -f "${payload:-}" "${AF_RESP:-}"' EXIT
+  # AF_WORK_PAYLOAD is script-global on purpose: an EXIT trap cannot see a
+  # function's locals (they are out of scope by the time it fires), so a
+  # function-local path would leak the temp file into $TMPDIR.
+  AF_WORK_PAYLOAD=$(mktemp)
+  local payload="$AF_WORK_PAYLOAD"
+  trap 'rm -rf "${AF_WORK_DIR:-}"; rm -f "${AF_WORK_PAYLOAD:-}" "${AF_RESP:-}"' EXIT
   jq -cn --argjson ids "$ids_json" --argjson p "$processed" \
     --arg resolution "$resolution" --argjson have "$have_resolution" \
     '{ids: $ids, processed: $p}
@@ -78,12 +81,20 @@ set_processed() { # <true|false> <id...> [--resolution TEXT]
   af_flush_spool
   af_request POST "/api/v1/submissions/processed" "$payload"
   if [ "$AF_HTTP_CODE" = 200 ]; then
+    # A 200 is only an answer when it has the shape the contract promises:
+    # echoing an unrecognised body as the outcome would report a mark that may
+    # never have happened.
+    if ! jq -e '(.processed | type) == "boolean"
+                and ((.updated | type) == "array")
+                and ((.unchanged | type) == "array")
+                and ((.not_found | type) == "array")' "$AF_RESP" >/dev/null 2>&1; then
+      af_error "malformed response from /api/v1/submissions/processed: $(head -c 300 "$AF_RESP" | tr -d '\n')"
+    fi
     af_outcome "$(jq -c . "$AF_RESP")"
   elif [ "$AF_HTTP_CODE" = 000 ]; then
-    af_die "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
+    af_error "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
   else
-    af_warn "HTTP $AF_HTTP_CODE: $(head -c 400 "$AF_RESP")"
-    exit 1
+    af_error "HTTP $AF_HTTP_CODE: $(head -c 400 "$AF_RESP" | tr -d '\n')"
   fi
 }
 
@@ -97,20 +108,21 @@ list_cmd() {
       --machine) FILTERS+=(--data-urlencode "machine=${2:-}"); shift 2 ;;
       --limit)
         limit="${2:-0}"
-        [[ "$limit" =~ ^[0-9]+$ ]] || af_die "--limit must be a non-negative integer"
+        [[ "$limit" =~ ^[0-9]+$ ]] || af_reject "--limit must be a non-negative integer"
         shift 2 ;;
       --include-processed) include_processed=1; shift ;;
-      --all) af_die "--all was replaced by --include-processed (list defaults to unprocessed only)" ;;
+      --all) af_reject "--all was replaced by --include-processed (list defaults to unprocessed only)" ;;
       --json) as_json=1; shift ;;
-      *) usage ;;
+      *) usage "unknown flag: $1" ;;
     esac
   done
   [ "$include_processed" = 1 ] || FILTERS+=(--data-urlencode "processed=false")
 
-  local work rows total=0 before_id="" page_limit fetched=0
-  work=$(mktemp -d) || af_die "could not create a temporary directory"
-  trap 'rm -rf "${work:-}"; rm -f "${AF_RESP:-}"' EXIT
-  rows="$work/rows.ndjson"
+  local rows total=0 before_id="" page_limit fetched=0 page_rows=0 next
+  # Script-global for the EXIT trap (see the note in set_processed).
+  AF_WORK_DIR=$(mktemp -d) || af_die "could not create a temporary directory"
+  trap 'rm -rf "${AF_WORK_DIR:-}"; rm -f "${AF_WORK_PAYLOAD:-}" "${AF_RESP:-}"' EXIT
+  rows="$AF_WORK_DIR/rows.ndjson"
   : >"$rows"
 
   # Keyset pagination: follow next_before_id until the server says there is
@@ -122,23 +134,24 @@ list_cmd() {
       [ "$remaining" -gt 0 ] || break
       [ "$remaining" -lt "$page_limit" ] && page_limit="$remaining"
     fi
-    local -a PARAMS=("${FILTERS[@]}" --data-urlencode "limit=$page_limit")
+    local -a PARAMS=(${FILTERS[@]+"${FILTERS[@]}"} --data-urlencode "limit=$page_limit")
     [ -n "$before_id" ] && PARAMS+=(--data-urlencode "before_id=$before_id")
-    af_request_get "/api/v1/submissions" "${PARAMS[@]}"
+    af_request_get "/api/v1/submissions" ${PARAMS[@]+"${PARAMS[@]}"}
     if [ "$AF_HTTP_CODE" = 000 ]; then
-      af_die "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
+      af_error "service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL"
     elif [ "$AF_HTTP_CODE" != 200 ]; then
-      af_warn "HTTP $AF_HTTP_CODE: $(head -c 400 "$AF_RESP")"
-      exit 1
+      af_error "HTTP $AF_HTTP_CODE: $(head -c 400 "$AF_RESP" | tr -d '\n')"
     fi
-    jq -c '.submissions[]?' "$AF_RESP" >>"$rows"
-    total=$(jq -r '.total // 0' "$AF_RESP")
+    page_rows=$(jq -c '.submissions[]?' "$AF_RESP" | tee -a "$rows" | wc -l | tr -d ' ') \
+      || af_error "malformed response body from /api/v1/submissions"
+    total=$(jq -r '.total // 0' "$AF_RESP") \
+      || af_error "malformed response body from /api/v1/submissions"
     fetched=$(wc -l <"$rows" | tr -d ' ')
-    local has_more next
-    has_more=$(jq -r 'if .has_more then "1" else "0" end' "$AF_RESP")
-    next=$(jq -r '.next_before_id // empty' "$AF_RESP")
+    # A cursor that does not move strictly backwards, a missing cursor, or an
+    # empty page that still claims more would silently truncate the queue.
+    next=$(af_pagination_next "$AF_RESP" "$before_id" "$page_rows") \
+      || af_error "malformed pagination response"
     rm -f "$AF_RESP"
-    [ "$has_more" = 1 ] || break
     [ -n "$next" ] || break
     before_id="$next"
   done
@@ -149,15 +162,18 @@ list_cmd() {
     jq -r '[
         .id, (.family // "-"), .submission_type, .machine_name,
         (.category // .run_id // "-"),
-        ((.summary // "-") | gsub("[\\n\\t]"; " ") | .[0:160])
+        ((.summary // "-") | gsub("[\\r\\n\\t]"; " ") | .[0:160])
       ] | @tsv' "$rows"
   fi
   echo "total: $total" >&2
 }
 
+AF_WORK_DIR=""
+AF_WORK_PAYLOAD=""
+
 case "${1:-}" in
   list) shift; list_cmd "$@" ;;
   done) shift; set_processed true "$@" ;;
   undo) shift; set_processed false "$@" ;;
-  *) usage ;;
+  *) usage "expected one of: list, done, undo" ;;
 esac

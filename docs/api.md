@@ -371,4 +371,10 @@ type and omission behaviour. Additions:
   whatever precision the database held, from none to six).
 - Every stored row has a hash, so the 1.0 "legacy row without hash replays
   without comparison" case no longer exists.
+- `payload` is returned byte-exact as stored. 1.0 re-encoded it (keys sorted,
+  numbers as floats); 1.1 keeps submission order and number spelling for new
+  rows, and PostgreSQL's key order for imported rows. Consumers must not
+  depend on key order.
+- Unmatched routes and wrong methods under `/api/v1/` return the JSON error
+  shape (`not_found`, `method_not_allowed`) instead of plain text.
 - `GET /ready` also checks the schema version.

@@ -8,7 +8,11 @@
 #                   (--payload-file F | --stdin) [--dry-run]
 #
 # The payload is the JSON object read from --payload-file or stdin; it is sent
-# verbatim (never through jq's argv, so it may be arbitrarily large).
+# BYTE-FOR-BYTE verbatim: it is validated with jq but never re-serialised by
+# it, so number spelling (1.0, 1e0, 12345678901234567890) and key order reach
+# the server untouched. Duplicate keys are the server's business (400).
+# Size: the assembled request body must stay under 10 MiB, as the server's
+# limit does.
 #   --kind    producer namespace, e.g. deploy, benchmark. "friction" is
 #             reserved: file those with submit-friction.sh.
 #   --key     idempotency key within the kind. Defaults to
@@ -50,24 +54,29 @@ while [ $# -gt 0 ]; do
     --payload-file) PAYLOAD_SRC="${2:-}"; shift 2 ;;
     --stdin)        STDIN_MODE=1; shift ;;
     --dry-run)      DRY_RUN=1; shift ;;
-    *) af_die "unknown flag: $1 (see header for usage)" ;;
+    *) af_reject "unknown flag: $1 (see header for usage)" ;;
   esac
 done
 
 BODY="$WORKDIR/body.json"
 if [ "$STDIN_MODE" = 1 ] && [ -n "$PAYLOAD_SRC" ]; then
-  af_die "--payload-file and --stdin are mutually exclusive"
+  af_reject "--payload-file and --stdin are mutually exclusive"
 elif [ "$STDIN_MODE" = 1 ]; then
   cat >"$BODY"
 elif [ -n "$PAYLOAD_SRC" ]; then
-  [ -f "$PAYLOAD_SRC" ] || af_die "not a file: $PAYLOAD_SRC"
+  [ -f "$PAYLOAD_SRC" ] || af_reject "not a file: $PAYLOAD_SRC"
   cp "$PAYLOAD_SRC" "$BODY"
 else
-  af_die "one of --payload-file or --stdin is required (see header for usage)"
+  af_reject "one of --payload-file or --stdin is required (see header for usage)"
 fi
 
 jq -e 'type == "object"' "$BODY" >/dev/null 2>&1 \
   || af_reject "event payload must be a single JSON object"
+# jq accepts a concatenated stream of documents; exactly one is required, or the
+# envelope below would splice several values after "payload":.
+BODY_DOCS=$(jq -c . "$BODY" 2>/dev/null | wc -l | tr -d ' ')
+[ "$BODY_DOCS" = 1 ] \
+  || af_reject "event payload must be a single JSON object (got $BODY_DOCS JSON documents)"
 
 [ -n "$MODEL" ]   || MODEL=$(af_detect_model)
 [ -n "$MACHINE" ] || MACHINE=$(af_machine)
@@ -87,12 +96,18 @@ af_check_identifier "key" "$KEY"
 af_check_identifier "machine_name" "$MACHINE"
 af_check_identifier "coordinator_model" "$MODEL"
 
+# The envelope is built without the payload, then the payload's bytes are
+# spliced in by string assembly. Round-tripping it through jq would re-spell
+# numbers and reorder keys, and the server stores what it receives.
 PAYLOAD="$WORKDIR/payload.json"
-jq -n --arg kind "$KIND" --arg key "$KEY" \
+ENVELOPE=$(jq -cn --arg kind "$KIND" --arg key "$KEY" \
   --arg machine "$MACHINE" --arg model "$MODEL" \
-  --slurpfile body "$BODY" \
-  '{kind: $kind, key: $key, machine_name: $machine,
-    coordinator_model: $model, payload: $body[0]}' >"$PAYLOAD"
+  '{kind: $kind, key: $key, machine_name: $machine, coordinator_model: $model}')
+{ printf '%s,"payload":' "${ENVELOPE%\}}"; cat "$BODY"; printf '}\n'; } >"$PAYLOAD"
+
+PAYLOAD_BYTES=$(wc -c <"$PAYLOAD" | tr -d ' ')
+[ "$PAYLOAD_BYTES" -le "$AF_MAX_BODY_BYTES" ] \
+  || af_reject "event request body is $PAYLOAD_BYTES bytes, over the ${AF_MAX_BODY_BYTES}-byte limit"
 
 if [ "$DRY_RUN" = 1 ]; then
   cat "$PAYLOAD"
@@ -115,7 +130,9 @@ case "$AF_HTTP_CODE" in
       else
         af_outcome "$(jq -c --arg key "$KEY" '{status:"duplicate",id:.id,key:$key}' "$AF_RESP")"
       fi
-    elif ! af_event_identity_ok "$AF_RESP" "$PAYLOAD"; then
+    elif af_identity_comparable "$AF_RESP" && ! af_event_identity_ok "$AF_RESP" "$PAYLOAD"; then
+      # Only a receipt that parses, carries an id and names a DIFFERENT record
+      # is a collision. Anything else proves nothing and must be retried.
       af_warn "key collision: server returned a different record for $KEY"
       af_outcome "$(jq -cn --arg key "$KEY" '{status:"collision",key:$key}')"
       exit 1

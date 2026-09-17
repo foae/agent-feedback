@@ -4,6 +4,11 @@
 #
 # Usage: digest.sh [--out DIR] [--family friction]
 #
+# Without --out the digest lands in a freshly created
+# $TMPDIR/feedback-triage/<UTC timestamp>-XXXXXX directory, so two runs in the
+# same second never merge into one another's output. With --out the given path
+# is used as-is, and a non-empty directory is refused for the same reason.
+#
 # Output directory layout:
 #   <id>.json    one full record per row (payload included)
 #   index.json   array of every pulled record (same content as the files)
@@ -26,15 +31,28 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --out) OUT="${2:-}"; shift 2 ;;
     --family) FAMILY="${2:-friction}"; shift 2 ;;
-    *) echo "feedback-triage: unknown flag $1" >&2; exit 1 ;;
+    *) echo "feedback-triage: unknown flag $1" >&2
+       af_outcome "$(jq -cn --arg m "unknown flag $1" '{status:"rejected",message:$m}')"
+       exit 1 ;;
   esac
 done
 
 af_require_deps
 af_require_key
 
-[ -n "$OUT" ] || OUT="${TMPDIR:-/tmp}/feedback-triage/$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$OUT"
+if [ -n "$OUT" ]; then
+  mkdir -p "$OUT" || { echo "feedback-triage: cannot create $OUT" >&2; exit 1; }
+  # Mixing a new pull into an old digest silently produces a wrong triage set.
+  if [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
+    echo "feedback-triage: --out directory $OUT is not empty — refusing to mix digests" >&2
+    exit 1
+  fi
+else
+  BASE="${TMPDIR:-/tmp}/feedback-triage"
+  mkdir -p "$BASE" || { echo "feedback-triage: cannot create $BASE" >&2; exit 1; }
+  OUT=$(mktemp -d "$BASE/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX") \
+    || { echo "feedback-triage: cannot create a digest directory under $BASE" >&2; exit 1; }
+fi
 chmod 700 "$OUT"
 
 PAGE_SIZE=100
@@ -52,14 +70,18 @@ while :; do
     echo "feedback-triage: HTTP $AF_HTTP_CODE: $(head -c 300 "$AF_RESP")" >&2; rm -f "$AF_RESP"; exit 1
   fi
   [ -n "$total" ] || total=$(jq -r '.total // 0' "$AF_RESP")
-  jq -c '.submissions[]' "$AF_RESP" >> "$OUT/.rows.jsonl"
-  if [ "$(jq -r '.has_more' "$AF_RESP")" = "true" ]; then
-    before=$(jq -r '.next_before_id' "$AF_RESP")
+  page_rows=$(jq -c '.submissions[]?' "$AF_RESP" | tee -a "$OUT/.rows.jsonl" | wc -l | tr -d ' ')
+  # A cursor that does not move strictly backwards, a missing cursor, or an
+  # empty page that still claims more would silently truncate the triage set.
+  if ! next=$(af_pagination_next "$AF_RESP" "$before" "$page_rows"); then
     rm -f "$AF_RESP"
-    [ -n "$before" ] && [ "$before" != "null" ] || { echo "feedback-triage: has_more without next_before_id" >&2; exit 1; }
-  else
-    rm -f "$AF_RESP"; break
+    echo "feedback-triage: malformed pagination response" >&2
+    af_outcome '{"status":"error","message":"malformed pagination response"}'
+    exit 1
   fi
+  rm -f "$AF_RESP"
+  [ -n "$next" ] || break
+  before="$next"
 done
 
 count=$(wc -l < "$OUT/.rows.jsonl" | tr -d ' ')
