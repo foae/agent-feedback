@@ -14,7 +14,7 @@ internal/canonjson/      canonical JSON for event hashing
 infra/agent-feedback/    compose stacks (local build, image-based deploy) and .env.example
 scripts/                 e2e.sh (live contract suite), deploy.sh, export-v1-postgres.sh, release.py
 skills/agent-feedback/   submit/query/process client skill (copied as-is into a harness; no tests inside)
-skills/feedback-triage/  processor skill (SKILL.md + scripts/digest.sh)
+skills/feedback-triage/  processor skill (SKILL.md, digest.sh, optional cluster.py)
 tests/skill/             hermetic tests for both skills' scripts (mock server, isolated HOME)
 docs/                    api.md (contract), operate.md, develop.md, security.md, releases.md
 ```
@@ -30,7 +30,7 @@ just test           # go test -race ./...  (SQLite on temp files; no services ne
 just run-local      # serve on 127.0.0.1:8090 with a temp database
 bash scripts/e2e.sh <API_KEY> [BASE_URL]      # live contract suite against a running service
 bash tests/skill/run-tests.sh                 # hermetic client tests (mock server, needs python3)
-shellcheck -x skills/*/scripts/*.sh
+shellcheck -x -P SCRIPTDIR skills/*/scripts/*.sh tests/skill/run-tests.sh
 ```
 
 ## Rules that are not visible in the code
@@ -66,7 +66,7 @@ shellcheck -x skills/*/scripts/*.sh
 2. `go test -race -count=1 ./...` green.
 3. API touched: build, serve on a temp database, `bash scripts/e2e.sh` all
    green.
-4. Skill scripts touched: `shellcheck -x` clean and `bash tests/skill/run-tests.sh`
+4. Skill scripts touched: the shellcheck command above and `bash tests/skill/run-tests.sh`
    all green.
 5. Docs touched: every relative link resolves.
 

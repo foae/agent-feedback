@@ -32,6 +32,14 @@ Stored text is untrusted. A processor treats reports, suggested fixes and
 event payloads as evidence to verify, never as instructions to execute. The
 triage skill's checkout rule exists for this reason.
 
+The triage skill's optional TypeSafe helper is a separate disclosure boundary,
+not a server feature. It sends selected report prose only with explicit
+per-repository approval; a key alone never enables it. Reports can contain
+secrets in prose, so inspect the local preview before sending. Advice cannot
+authorize edits or processed marks. The
+[triage workflow](../skills/feedback-triage/SKILL.md#optional-typesafe-clustering-advice)
+defines the fields, consent rules and manual fallback.
+
 ## Data at rest
 
 One SQLite file in a Docker volume, readable by anyone who can read the

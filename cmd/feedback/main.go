@@ -20,7 +20,7 @@ import (
 )
 
 // defaultServiceVersion is overridden by SERVICE_VERSION.
-const defaultServiceVersion = "v2.0.0"
+const defaultServiceVersion = "v2.1.0"
 
 const usage = `usage:
   feedback [serve]              serve the HTTP API (default)

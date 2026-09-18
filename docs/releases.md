@@ -12,7 +12,7 @@ Maintainers need Git, Python 3 and an authenticated GitHub CLI (`gh`) with
 write access to the repository and its tags.
 
 1. Update the stable version link in `README.md`, the `SERVICE_VERSION`
-   default in `cmd/feedback/config.go` and in `.env.example`, and add notes to
+   default in `cmd/feedback/main.go` and in `.env.example`, and add notes to
    this file.
 2. Run the gates in [develop.md](develop.md#verification-before-you-are-done),
    commit, push `main`, and let CI finish on that exact commit (it publishes
@@ -45,6 +45,19 @@ that version. Rewrite the section's relative links to repo-root paths
 (`api.md` to `docs/api.md`) — a release body resolves them against the
 repository root, not `docs/`. Corrections to source
 need a new version; corrections to release prose need no new tag.
+
+## v2.1.0 — Optional advisory triage clustering
+
+- **Skill `feedback-triage` 1.1** adds a Python 3.9+ helper that compares
+  report mechanisms through TypeSafe and suggests clusters. The manual
+  workflow remains the default; no service/API or storage changes.
+- Disclosure requires explicit approval for each exact repository identity.
+  Preview is local; unapproved or unidentified reports are never sent.
+  No credential is copied, no queue item is marked, and no report is removed.
+- Advice retains source IDs, the digest hash and individual probabilities.
+  Groups require agreement for every member pair, not transitive matches.
+  Uncertain, unavailable and invalid answers fall back to manual triage;
+  bounded requests preserve partial results without dropping reports.
 
 ## v2.0.0 — SQLite, generic events, triage skill
 

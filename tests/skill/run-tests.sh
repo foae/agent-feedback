@@ -29,7 +29,7 @@ python3 "$TESTS_DIR/mock_server.py" "$STATE" &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null; chmod -R u+rwX "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
-for i in $(seq 1 50); do [ -s "$STATE/port" ] && break; sleep 0.1; done
+for _ in $(seq 1 50); do [ -s "$STATE/port" ] && break; sleep 0.1; done
 [ -s "$STATE/port" ] || { echo "FATAL mock server did not start" >&2; exit 1; }
 PORT=$(cat "$STATE/port")
 
@@ -46,7 +46,7 @@ unset REVIEW_CALLER_MODEL AI_AGENT CLAUDE_EFFORT CLAUDE_CODE_SESSION_ID \
       2>/dev/null || true
 # Run everything from a non-git temp cwd so auto-detected context (cwd, git)
 # is deterministic regardless of where the suite was invoked.
-cd "$WORK"
+cd "$WORK" || exit 1
 
 pass=0; fail=0
 chk() { # chk <desc> <ok 0|1>
@@ -101,7 +101,7 @@ chk "friction payload fields + auth" "$(jq -r 'if .auth and .body.machine_name==
   and .body.project=="proj1" and .body.harness=="claude-code" then 1 else 0 end' <<<"$req")"
 
 # 2. --stdin: prose with quotes/backticks/hyphens survives untouched
-prose='The bash tool runs `hypa` and exits 127 — while "hypa_shell" works.'
+prose="The bash tool runs \`hypa\` and exits 127 — while \"hypa_shell\" works."
 out=$(jq -n --arg d "$prose" \
   '{category:"tooling",summary:"stdin summary",details:$d,harness:"pi"}' \
   | bash "$SCRIPTS/submit-friction.sh" --stdin --model claude-fable-5 2>/dev/null)
@@ -851,7 +851,7 @@ chk "process list passes family/type/machine" "$(jq -r '
   and (.path|test("machine=other")) then 1 else 0 end' <<<"$req")"
 
 # 18. done: batch mark with a resolution, outcome echoed verbatim
-out=$(bash "$SCRIPTS/process.sh" done 43 44 --resolution "fixed in example@1a2b3c4" 2>/dev/null)
+out=$(bash "$SCRIPTS/process.sh" 'done' 43 44 --resolution "fixed in example@1a2b3c4" 2>/dev/null)
 rc=$?
 o=$(outcome "$out")
 req=$(last_req)
@@ -864,7 +864,7 @@ chk "process done --resolution -> ids marked, resolution sent and echoed" "$(jq 
 
 # 18a. a blank resolution is rejected locally (the server would 400)
 before=$(log_len)
-out=$(bash "$SCRIPTS/process.sh" done 43 --resolution "   " 2>/dev/null)
+out=$(bash "$SCRIPTS/process.sh" 'done' 43 --resolution "   " 2>/dev/null)
 rc=$?
 o=$(outcome "$out")
 chk "blank --resolution -> rejected locally, no request" "$(jq -n --arg o "$o" \
@@ -878,8 +878,8 @@ chk "process undo -> processed:false without resolution" "$(jq -r '
   if .body.processed==false and .body.ids==[44] and (.body|has("resolution")|not) then 1 else 0 end' <<<"$req")"
 
 # 20. non-numeric id dies
-bash "$SCRIPTS/process.sh" done abc >/dev/null 2>&1
-chk "process done abc -> exit 1" "$([ $? != 0 ] && echo 1 || echo 0)"
+if bash "$SCRIPTS/process.sh" 'done' abc >/dev/null 2>&1; then rc=0; else rc=$?; fi
+chk "process done abc -> exit 1" "$([ "$rc" = 1 ] && echo 1 || echo 0)"
 
 # ── feedback-triage digest.sh ────────────────────────────────────────────────
 
@@ -969,7 +969,7 @@ chk "unknown flags -> rejected outcome everywhere, exit 1, no request" \
 out=$(env AGENT_FEEDBACK_URL="http://127.0.0.1:1" bash "$SCRIPTS/process.sh" list 2>/dev/null); rc=$?
 list_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
   if $j.status=="error" and ($j.message|test("unreachable")) and $rc==1 then 1 else 0 end')
-out=$(env AGENT_FEEDBACK_URL="http://127.0.0.1:1" bash "$SCRIPTS/process.sh" done 43 2>/dev/null); rc=$?
+out=$(env AGENT_FEEDBACK_URL="http://127.0.0.1:1" bash "$SCRIPTS/process.sh" 'done' 43 2>/dev/null); rc=$?
 done_ok=$(jq -n --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
   if $j.status=="error" and ($j.message|test("unreachable")) and $rc==1 then 1 else 0 end')
 chk "process.sh on an unreachable service -> error outcome, exit 1" \
@@ -978,7 +978,7 @@ rm -f "$SPOOL"/* 2>/dev/null || true
 
 # 25. A 200 that is not the documented classification shape is not an answer.
 set_mode processed_bad
-out=$(bash "$SCRIPTS/process.sh" done 43 2>/dev/null); rc=$?
+out=$(bash "$SCRIPTS/process.sh" 'done' 43 2>/dev/null); rc=$?
 chk "process done with a malformed 200 -> error outcome, exit 1" "$(jq -n \
   --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
   if $j.status=="error" and ($j.message|test("malformed")) and $rc==1 then 1 else 0 end')"
@@ -1315,7 +1315,7 @@ q_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval3.out")")" --argjson rc "$rc"
 run_with_timeout 10 "$WORK/noval4.out" bash "$SCRIPTS/process.sh" list --family; rc=$?
 pl_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval4.out")")" --argjson rc "$rc" '($o|fromjson) as $j |
   if $j.status=="rejected" and ($j.message|test("requires a value")) and $rc==1 then 1 else 0 end' 2>/dev/null || echo 0)
-run_with_timeout 10 "$WORK/noval5.out" bash "$SCRIPTS/process.sh" done 43 --resolution; rc=$?
+run_with_timeout 10 "$WORK/noval5.out" bash "$SCRIPTS/process.sh" 'done' 43 --resolution; rc=$?
 pd_ok=$(jq -n --arg o "$(outcome "$(cat "$WORK/noval5.out")")" --argjson rc "$rc" '($o|fromjson) as $j |
   if $j.status=="rejected" and ($j.message|test("requires a value")) and $rc==1 then 1 else 0 end' 2>/dev/null || echo 0)
 run_with_timeout 10 "$WORK/noval6.out" bash "$SCRIPTS/submit-friction.sh" --category; rc=$?
@@ -1396,11 +1396,15 @@ set_list_rows 1
 # 50. A well-shaped 200 that classifies submissions nobody asked about is not
 # an answer: echoing it would report a mark that never happened.
 set_mode processed_foreign_ids
-out=$(bash "$SCRIPTS/process.sh" done 43 2>/dev/null); rc=$?
+out=$(bash "$SCRIPTS/process.sh" 'done' 43 2>/dev/null); rc=$?
 chk "processed 200 naming foreign ids -> error outcome, exit 1" "$(jq -n \
   --arg o "$(outcome "$out")" --argjson rc "$rc" '($o|fromjson) as $j |
   if $j.status=="error" and $rc==1 then 1 else 0 end')"
 set_mode created
+
+python3 "$TESTS_DIR/test_cluster.py"
+rc=$?
+chk "triage advisory disclosure and failure boundaries" "$([ "$rc" = 0 ] && echo 1 || echo 0)"
 
 echo
 echo "skill tests: $pass passed, $fail failed"
