@@ -13,7 +13,7 @@ internal/store/          SQLite: open + pragmas, embedded forward-only migration
 internal/canonjson/      canonical JSON for event hashing
 infra/agent-feedback/    compose stacks (local build, image-based deploy) and .env.example
 scripts/                 e2e.sh (live contract suite), deploy.sh, export-v1-postgres.sh, release.py
-skills/agent-feedback/   submit/query/process client skill (distributed verbatim, no tests inside)
+skills/agent-feedback/   submit/query/process client skill (copied as-is into a harness; no tests inside)
 skills/feedback-triage/  processor skill (SKILL.md + scripts/digest.sh)
 tests/skill/             hermetic tests for both skills' scripts (mock server, isolated HOME)
 docs/                    api.md (contract), operate.md, develop.md, security.md, releases.md
@@ -53,7 +53,7 @@ shellcheck -x skills/*/scripts/*.sh
   `map[string]any` on the way out; it changes large integers.
 - **Metrics labels are bounded.** Route pattern, allow-listed method, status
   code. Never a raw path, never client input.
-- **Skill directories are distributed verbatim.** No tests or tooling inside
+- **Skill directories are copied as-is into harnesses.** No tests or tooling inside
   `skills/*/`; tests live in `tests/skill/`. Script comments state rules, not
   history: no dates, incident numbers or machine names.
 - **Compatibility.** Everything in API 1.0 keeps working. Additive changes
