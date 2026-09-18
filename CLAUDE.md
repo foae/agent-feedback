@@ -38,7 +38,7 @@ bash tests/skill/run-tests.sh               # hermetic skill-script tests (pytho
 - Migrations are forward-only, append-only, one transaction each.
 - `skills/*/` ship verbatim: no tests, no tooling, no history in comments.
 - Docs are written for agents first: lead with the command, state the rule,
-  skip the anecdote. Nothing machine-, user- or fleet-specific.
+  skip the anecdote. Nothing machine-, user- or organization-specific.
 - Every delivered change lands in a `vMAJOR.MINOR.PATCH` release.
 
 ## Verification before you are done

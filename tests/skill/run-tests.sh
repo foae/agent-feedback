@@ -4,7 +4,7 @@
 # spool never touches the real cache.
 #
 # Lives OUTSIDE skills/agent-feedback/ on purpose: the skill directory is
-# distributed as-is, and test tooling must never travel with it.
+# copied as-is into a harness, and test tooling must never travel with it.
 #
 # Portable to macOS and Linux: no GNU-only flags (no `touch -d`), and every
 # path comparison uses the canonical (symlink-resolved) form, because macOS
