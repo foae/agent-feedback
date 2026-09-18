@@ -36,8 +36,14 @@ write access to the repository and its tags.
 If publication fails after tagging, inspect the local tag, the remote tag, the
 CI run and the GitHub release before doing anything. Never force-move a
 published tag. Local tag only: push it with an absence lease. Remote tag
-without a release: `gh release create <tag> --verify-tag --title '<name>' --notes-file <file>`.
-Release exists: inspect it rather than creating another. Corrections to source
+without a release: `gh release create <tag> --verify-tag --latest --title '<name>' --notes-file <file>`.
+Release exists: inspect it rather than creating another.
+
+The notes file from step 3 is uncommitted, so it does not exist on another
+machine: recovering there means rebuilding it from this file's section for
+that version. Rewrite the section's relative links to repo-root paths
+(`api.md` to `docs/api.md`) — a release body resolves them against the
+repository root, not `docs/`. Corrections to source
 need a new version; corrections to release prose need no new tag.
 
 ## v2.0.0 — SQLite, generic events, triage skill
