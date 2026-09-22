@@ -5,7 +5,7 @@
 # Required: DEPLOY_REMOTE   SSH destination (user@host)
 # Optional: DEPLOY_IMAGE    image repository, default ghcr.io/foae/agent-feedback
 #           DEPLOY_DIR      remote directory, default ~/agent-feedback
-# Both may live in the gitignored .private/deploy.env.
+# All three may live in the gitignored .private/deploy.env.
 #
 # Steps: install the compose file, create/preserve the remote .env (API_KEY is
 # generated once and never printed), pin FEEDBACK_IMAGE to the requested tag in

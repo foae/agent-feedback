@@ -15,9 +15,7 @@ Needs Docker with Compose. From the repository root:
 
 ```bash
 cd infra/agent-feedback
-test ! -e .env || { echo '.env exists; refusing to overwrite' >&2; exit 1; }
-umask 077
-printf 'API_KEY=%s\n' "$(openssl rand -hex 32)" > .env
+test -e .env || (umask 077 && printf 'API_KEY=%s\n' "$(openssl rand -hex 32)" > .env)   # keeps an existing key
 docker compose up -d --build --wait
 curl --fail --silent --show-error http://127.0.0.1:8090/ready
 ```
@@ -35,11 +33,11 @@ bash ../../skills/agent-feedback/scripts/process.sh list
 Tear down with `docker compose down -v` (deletes the database volume; `.env`
 stays).
 
-Without Docker: `go build ./cmd/feedback && API_KEY=dev DATABASE_PATH=/tmp/feedback.db HTTP_LISTEN_ADDR=127.0.0.1:8090 ./feedback`.
+Without Docker: `go build -o bin/feedback ./cmd/feedback && API_KEY=dev DATABASE_PATH=/tmp/feedback.db HTTP_LISTEN_ADDR=127.0.0.1:8090 bin/feedback`.
 
 ## Deploy to a host
 
-Prerequisites on the host: Docker with Compose, `curl`, SSH access. The
+Prerequisites on the host: Docker with Compose, `curl`, `openssl`, SSH access. The
 image is published by CI to `ghcr.io/foae/agent-feedback` tagged `latest` and
 with the commit SHA. The package must be publicly pullable (GitHub package
 settings) or the host must be logged in to GHCR.
@@ -59,8 +57,9 @@ DEPLOY_REMOTE=user@host bash scripts/deploy.sh <commit-sha>
 4. runs `docker compose pull && docker compose up -d --wait` and checks `/ready`.
 
 Always deploy a commit SHA, never `latest`: an old CI run finishing late can
-move `latest` backwards. `DEPLOY_REMOTE` and `DEPLOY_IMAGE` can live in the
-gitignored `.private/deploy.env`.
+move `latest` backwards. `DEPLOY_REMOTE`, `DEPLOY_IMAGE` and `DEPLOY_DIR`
+(remote directory, default `~/agent-feedback`, which the sections below
+assume) can live in the gitignored `.private/deploy.env`.
 
 The stack binds `127.0.0.1:8090` on the host. To serve other machines, set
 `FEEDBACK_BIND_ADDRESS=0.0.0.0` in the host `.env` only inside a trusted
@@ -91,6 +90,7 @@ Two complementary forms.
 ```bash
 cd ~/agent-feedback
 docker compose exec feedback /opt/feedback backup /data/backup-$(date -u +%Y%m%dT%H%M%SZ).db
+mkdir -p backups
 docker compose cp feedback:/data/backup-<stamp>.db ./backups/
 docker compose exec feedback rm /data/backup-<stamp>.db
 ```
@@ -181,10 +181,12 @@ producers retry with the new key on their next call.
 
 Nothing is deleted automatically. `processed` means acted on, not removed.
 To purge, export first, then delete inside the container with an explicit
-predicate, for example rows processed more than a year ago:
+predicate, as root because the image runs unprivileged (the `sqlite` package
+lasts until the container is recreated), for example rows processed more than
+a year ago:
 
 ```bash
-docker compose exec feedback sh -c 'apk add --no-cache sqlite >/dev/null && sqlite3 /data/feedback.db "DELETE FROM submissions WHERE processed_at < (strftime(\"%s\",\"now\")-31536000)*1000000"'
+docker compose exec -u root feedback sh -c 'apk add --no-cache sqlite >/dev/null && sqlite3 /data/feedback.db "DELETE FROM submissions WHERE processed_at < (strftime(\"%s\",\"now\")-31536000)*1000000"'
 ```
 
 Client spools live in `~/.cache/agent-feedback/spool/` on each producer and
@@ -210,15 +212,17 @@ removing any service; the data is gone with the volume.
 
 ### Skills, on every machine that has them
 
-1. Find the installed copies: `ls -la ~/.claude/skills/agent-feedback ~/.claude/skills/agent-feedback-triage ~/.claude/skills/feedback-triage ~/.agents/skills/agent-feedback ~/.agents/skills/agent-feedback-triage ~/.agents/skills/feedback-triage 2>/dev/null`
-   and any other harness skill directory you use. Entries may be symlinks into
+1. Find the installed copies (`agent-feedback`, `agent-feedback-triage`, and
+   `feedback-triage` from before v2.2.0) in every harness skills directory you
+   use, e.g. `ls -la ~/.claude/skills | grep feedback`. Entries may be symlinks into
    a shared checkout; remove the links, then the checkout if nothing else uses it.
 2. Flush or discard unsent payloads first: `bash <skill-dir>/scripts/query.sh --flush --limit 1`
    sends whatever is spooled; or delete `~/.cache/agent-feedback/` to drop it.
 3. Remove the directories or links, then `rm -rf ~/.cache/agent-feedback`.
 4. Remove `AGENT_FEEDBACK_URL`, `AGENT_FEEDBACK_API_KEY`, `AGENT_FEEDBACK_MACHINE`,
    `AGENT_FEEDBACK_MODEL`, `AGENT_FEEDBACK_HARNESS`, `AGENT_FEEDBACK_SESSION_ID`
-   and `AGENT_FEEDBACK_REVIEW_DIRS` from shell profiles (`grep -n AGENT_FEEDBACK ~/.zshenv ~/.zshrc ~/.bashrc ~/.profile 2>/dev/null`).
+   `AGENT_FEEDBACK_REVIEW_DIRS` and `AGENT_FEEDBACK_TRIAGE_ROOTS` (plus
+   `TYPESAFE_API_KEY` if only triage used it) from shell profiles (`grep -n AGENT_FEEDBACK ~/.zshenv ~/.zshrc ~/.bashrc ~/.profile 2>/dev/null`).
 5. Remove any directive in your agent system prompt that tells agents to
    submit friction, and any hook in a review runner that calls `submit-review.sh`.
 

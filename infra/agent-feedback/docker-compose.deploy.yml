@@ -1,6 +1,6 @@
 # Image-based deployment stack — installed by scripts/deploy.sh over SSH.
-# The script streams the image to the target, which needs no registry
-# credentials. Set FEEDBACK_IMAGE to a full image reference, including its tag,
+# The host pulls the image from the registry (public package or logged in).
+# Set FEEDBACK_IMAGE to a full image reference, including its tag,
 # for both scripted and manual Compose operations.
 services:
   feedback:

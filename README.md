@@ -28,8 +28,8 @@ Two parts:
 
 ```bash
 git clone https://github.com/foae/agent-feedback.git && cd agent-feedback
-git checkout v2.0.0
-cd infra/agent-feedback && umask 077 && printf 'API_KEY=%s\n' "$(openssl rand -hex 32)" > .env
+git checkout "$(git describe --tags --abbrev=0)"   # latest release
+cd infra/agent-feedback && test ! -e .env && umask 077 && printf 'API_KEY=%s\n' "$(openssl rand -hex 32)" > .env
 docker compose up -d --build --wait
 export AGENT_FEEDBACK_URL=http://127.0.0.1:8090 AGENT_FEEDBACK_API_KEY=$(sed -n 's/^API_KEY=//p' .env)
 bash ../../skills/agent-feedback/scripts/submit-friction.sh --category test --summary "hello" --model manual
@@ -41,13 +41,8 @@ Needs Docker with Compose, `curl`, `jq`, `openssl`. The service binds
 
 ## Uninstall
 
-Three parts, each removable on its own: the skills on every machine (delete
-the skill directories or links, `~/.cache/agent-feedback/`, and the
-`AGENT_FEEDBACK_*` variables from shell profiles), the 2.x service (`docker
-compose down -v` in the deploy directory after a `feedback backup`), and a
-leftover 1.x PostgreSQL stack (dump first, then `down -v`; its compose file
-needs `FEEDBACK_IMAGE` set before it parses). Exact commands, including the
-1.x case, in [`docs/operate.md#uninstall`](docs/operate.md#uninstall).
+The skills, the service and a leftover 1.x stack are removed independently;
+back up first. Commands in [`docs/operate.md#uninstall`](docs/operate.md#uninstall).
 
 ## What it is not
 

@@ -6,14 +6,16 @@ Source releases are annotated, immutable `vMAJOR.MINOR.PATCH` tags: patch for
 compatible fixes, docs and dependency updates; minor for compatible features;
 major for breaking API or operational contracts. Every delivered change belongs
 to a release. The two skills carry their own `version` in their `SKILL.md`;
-bump one only when its command contract changes.
+bump one only when its command contract changes. For `agent-feedback`, bump
+`AF_CLIENT_VERSION` in `scripts/_common.sh` and its pin in
+`tests/skill/run-tests.sh` with it: that value is what payloads report.
 
 Maintainers need Git, Python 3 and an authenticated GitHub CLI (`gh`) with
 write access to the repository and its tags.
 
 1. Update the stable version link in `README.md`, the `SERVICE_VERSION`
-   default in `cmd/feedback/main.go` and in `.env.example`, and add notes to
-   this file.
+   default in `cmd/feedback/main.go` and in the root `.env.example`, and add
+   notes to this file.
 2. Run the gates in [develop.md](develop.md#verification-before-you-are-done),
    commit, push `main`, and let CI finish on that exact commit (it publishes
    the image).

@@ -6,6 +6,9 @@ this, then write the calls. Prefer the shipped client scripts in
 spooling, retries, receipt validation and outcome reporting. Hand-roll HTTP
 only for a producer the client does not cover.
 
+API version: **1.1**. Additions since 1.0 are listed in
+[Changes since API 1.0](#changes-since-api-10).
+
 Contents:
 
 1. [Base URL, auth, common rules](#base-url-auth-common-rules)
@@ -38,7 +41,8 @@ Missing or wrong key: `401 {"error":"unauthorized","message":"missing or invalid
 
 Rules that apply to every endpoint:
 
-- Responses are JSON. Errors have the shape `{"error":"<code>","message":"<text>"}`.
+- Responses are JSON, except `GET /api/v1/export` (NDJSON) and `/health`,
+  `/ready` (plain text). Errors have the shape `{"error":"<code>","message":"<text>"}`.
   `message` names the offending field when there is one.
 - POST bodies must be exactly one JSON object. Unknown fields are rejected with
   `400 bad_request` naming the field. A typo is a bug, not something to drop:
@@ -222,8 +226,8 @@ Response:
 
 - Rows are summaries: the record without `payload`, plus for frictions the
   `category`, `summary`, `project` and `harness` fields lifted to the top level
-  so a list is scannable. With `include=payload` rows are full records; a
-  page can then be large (up to 100 records of up to 10 MiB each), so keep
+  so a list is scannable. With `include=payload` rows are the summary shape with
+  `payload` added (the lifted friction fields stay); a page can then be large (up to 100 records of up to 10 MiB each), so keep
   `limit` small when payloads are big.
 - `total` counts every row matching the filters (ignoring `before_id`,
   `offset` and `limit`), computed in the same read transaction as the page.

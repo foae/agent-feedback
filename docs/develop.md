@@ -17,7 +17,8 @@ scripts/                        e2e.sh (live contract suite), deploy.sh, export-
 skills/agent-feedback/          submit/query/process client skill (copied as-is into a harness; no tests inside)
 skills/agent-feedback-triage/   processor skill (SKILL.md, digest.sh, optional cluster.py)
 tests/skill/                    hermetic tests for both skills' scripts (mock server, isolated HOME)
-docs/                           api.md (contract), operate.md, develop.md, security.md, releases.md
+docs/                           api.md (contract), operate.md, develop.md, security.md, releases.md,
+                                agent-usage.md (redirect for API 1.0 links)
 ```
 
 Go toolchain and module versions are pinned in `go.mod`. Tools: `just`,
@@ -27,7 +28,7 @@ Go toolchain and module versions are pinned in `go.mod`. Tools: `just`,
 
 ```bash
 just check          # gofmt, go vet, go mod tidy, build — the pre-commit gate
-just test           # go test -race ./...  (SQLite on temp files; no services needed)
+just test           # go test -race -count=1 ./...  (SQLite on temp files; no services needed)
 just run-local      # serve on 127.0.0.1:8090 with a temp database
 bash scripts/e2e.sh <API_KEY> [BASE_URL]      # live contract suite against a running service
 bash tests/skill/run-tests.sh                 # hermetic client tests (mock server, needs python3)
@@ -55,6 +56,9 @@ python3 scripts/eval-cluster.py <export.ndjson> <labels.json> --allow-repo <remo
   `map[string]any` on the way out; it changes large integers.
 - **Metrics labels are bounded.** Route pattern, allow-listed method, status
   code. Never a raw path, never client input.
+- **Docs are written for agents first.** Lead with the command, state the
+  rule, skip the anecdote. One doc per task, no duplicated facts; keep the
+  README route table true. Nothing machine-, user- or organization-specific.
 - **Skill directories are copied as-is into harnesses.** No tests or tooling inside
   `skills/*/`; tests live in `tests/skill/`. Script comments state rules, not
   history: no dates, incident numbers or machine names.
@@ -68,7 +72,7 @@ python3 scripts/eval-cluster.py <export.ndjson> <labels.json> --allow-repo <remo
 - **Triage is user-invoked only.** Keep `disable-model-invocation: true` and
   a description that forbids loading it from phrasing about the queue.
 - **Compatibility.** Everything in API 1.0 keeps working. Additive changes
-  bump the API minor in api.md's "Changes" section; anything else is a major
+  bump the API minor in api.md's version line and "Changes" section; anything else is a major
   release.
 
 ## Verification before you are done
@@ -86,8 +90,5 @@ CI runs the same gates and, on `main`, publishes the image as
 
 ## Release
 
-Every delivered change ships in a `vMAJOR.MINOR.PATCH` release: patch for
-compatible fixes and docs, minor for compatible features, major for breaking
-API or operational contracts. Steps in [releases.md](releases.md); the tool is
-`python3 scripts/release.py`. The skills carry their own `version` in
-`SKILL.md`; bump them only when their command contract changes.
+Every delivered change ships in a release; versioning rules and steps are in
+[releases.md](releases.md).

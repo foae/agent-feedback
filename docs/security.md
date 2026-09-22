@@ -20,8 +20,9 @@ is not multi-tenant and is not safe to expose directly to the internet.
 
 ## What gets stored
 
-Friction context collected by the client (working directory, repository root
-and remote, branch, commit, dirty flag, OS, session id) can reveal usernames,
+Friction context collected by the client (event time, working directory,
+repository root and remote, branch, commit, dirty flag, OS, architecture,
+session id, agent id, effort, harness profile name, client version) can reveal usernames,
 private repository names and internal hostnames. The client strips
 credentials, query strings and fragments from remote URLs; it does not detect
 secrets in prose. Preview with `--dry-run`. Review outputs and prompts are

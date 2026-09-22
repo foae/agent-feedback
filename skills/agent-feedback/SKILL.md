@@ -2,7 +2,7 @@
 name: agent-feedback
 description: Report friction (what slowed you down) and other write-once telemetry to a self-hosted agent-feedback service, and read the queue back. Use when your instructions tell you to surface or submit friction, when you need to record a review run or a generic event, or when you need to list, inspect or mark processed submissions. Processing the queue end to end is the sibling agent-feedback-triage skill, which only the user invokes.
 license: MIT
-compatibility: Any harness that can run bash. Requires curl and jq, plus AGENT_FEEDBACK_URL and AGENT_FEEDBACK_API_KEY in the environment.
+compatibility: Any harness that can run bash. Requires curl and jq (and sha256sum or shasum for query.sh export), plus AGENT_FEEDBACK_URL and AGENT_FEEDBACK_API_KEY in the environment.
 metadata:
   author: foae
   version: "3.0"
@@ -42,12 +42,12 @@ AGENT_FEEDBACK_MODEL      optional: your model id when the harness cannot tell t
 AGENT_FEEDBACK_HARNESS    optional: overrides harness auto-detection
 AGENT_FEEDBACK_SESSION_ID optional: overrides session-id detection
 AGENT_FEEDBACK_REVIEW_DIRS optional: colon-separated review run-directory roots for submit-review.sh --sweep
+AGENT_FEEDBACK_TRIAGE_ROOTS optional, triage only: colon-separated directories holding local checkouts
 ```
 
 The sibling `agent-feedback-triage` skill installs the same way, beside this
 one, and only where someone processes the queue. It runs only when the user
-invokes it (`disable-model-invocation: true`). A copy named `feedback-triage`
-is an older version of it: remove that copy.
+invokes it (`disable-model-invocation: true`).
 
 Check the install: `bash scripts/submit-friction.sh --category test --summary "install check" --model <your model> --dry-run`
 prints the payload and `{"status":"valid"}` without sending anything.
@@ -84,7 +84,9 @@ bash scripts/submit-friction.sh --category tooling --summary "linter hangs on em
   ones: `documentation`, `tooling`, `config`, `environment`.
 - **Always pass your model id** (`--model` or `"model"`); no harness exposes it
   to child processes and `unknown` rows are useless for analysis.
-- `harness`, `project`, `machine` are auto-detected; pass them only to override.
+- `harness`, `project`, `machine` are auto-detected. Override `harness` and
+  `project` with their flags, `machine` with `AGENT_FEEDBACK_MACHINE` or the
+  `"machine"` key in stdin JSON (`submit-friction.sh` has no `--machine`).
 - **Context is collected for you**: `occurred_at`, `cwd`, `repo_root`,
   `git_remote` (credentials stripped), `git_branch`, `git_commit`, `git_dirty`,
   `os`, `arch`, `session_id`, `client_version`, and harness metadata when
@@ -102,7 +104,8 @@ bash scripts/submit-friction.sh --category tooling --summary "linter hangs on em
 ## Outcomes and exit codes
 
 Every submit and process command prints, as its **last stdout line**, one
-JSON outcome. Relay it to the user verbatim.
+JSON outcome; `submit-review.sh --sweep` prints one per submitted run and
+none when nothing qualifies. Relay outcomes to the user verbatim.
 
 | Outcome | Meaning | Exit |
 |---|---|---|
@@ -123,9 +126,10 @@ the same instant can still lose it, so a backlog warning plus the payload on
 stderr is the recovery path, not a durability guarantee. Frictions are
 retried for 20 hours (inside the server's 24 hour dedupe window, so a retry
 can never double-file); reviews and events for 30 days (they are idempotent).
-A `401` leaves spooled payloads retryable so a key fix flushes them. Every
-script prints a one-line backlog warning on stderr while unsent payloads
-exist; surface it, it is the only signal the service is down. The scripts
+A `401` leaves spooled payloads retryable so a key fix flushes them. The
+submit scripts and `query.sh` print a one-line backlog warning on stderr while
+unsent payloads exist (`process.sh` does not); surface it, it is the only
+signal the service is down. The scripts
 never print the API key, and send it via a mode-0600 header file, not argv.
 
 ## Process the queue
@@ -133,7 +137,7 @@ never print the API key, and send it via a mode-0600 header file, not argv.
 Used by the agent-feedback-triage skill and by any session closing a row it fixed.
 
 ```bash
-bash scripts/process.sh list                          # every unprocessed row, all pages; TSV: id family type machine category summary
+bash scripts/process.sh list                          # every unprocessed row, all pages; TSV: id family type machine category-or-run_id summary
 bash scripts/process.sh list --family friction --json # merged JSON {"submissions":[…],"total":N}
 bash scripts/process.sh list --include-processed --limit 200
 bash scripts/process.sh done 43 44 --resolution "fixed in example@a1b2c3d"
@@ -186,7 +190,9 @@ bash scripts/submit-review.sh --sweep                      # flush the spool, su
 ```
 
 `--sweep` scans `REVIEW_LOG_DIR` and every directory in
-`AGENT_FEEDBACK_REVIEW_DIRS`. Runs sharing a timestamp are refused because a
+`AGENT_FEEDBACK_REVIEW_DIRS`, skipping runs younger than `SWEEP_MIN_AGE_HOURS`
+(default 2) and doing nothing while another sweep holds the lock; to retry a
+fresh run, pass its directory. Runs sharing a timestamp are refused because a
 timestamp-keyed ledger cannot tell their grades apart; fix the ledger, then
 retry. `--include-outputs` after a default submission returns `mismatch`: the
 enriched payload differs from the stored one, and the server never
@@ -197,7 +203,8 @@ overwrites.
 `<root>/<run_ts>-<pid>/` containing:
 
 - `meta.json`: `machine`, `skill`, `run_ts`, `caller` (coordinator model at
-  run time), and a `slots` map of slot → `{model, label}`.
+  run time), and a `slots` map of slot → `{model, label}`; only `label` is
+  read from it, the model comes from `summary.tsv`.
 - `summary.tsv`: header, then one row per reviewer: `slot model status duration_s bytes`
   (`duration_s`/`bytes` may be empty).
 - `<slot>.md`: raw reviewer output (sent only with `--include-outputs`).
@@ -216,6 +223,7 @@ written into the run directory after a validated receipt.
 
 - 000 / 5xx → spool, outcome `spooled`, exit 0.
 - 4xx → outcome `rejected` with the server's message (it names the field), exit 1.
+- 1xx / 3xx → outcome `rejected`, exit 1: the URL does not point at the service.
 - 409 → outcome `mismatch`, exit 1; stored record untouched.
 - 2xx with a malformed body → treated as not delivered: spooled for retry.
 - Spool directory unwritable → outcome `failed`, payload on stderr, exit 1.
