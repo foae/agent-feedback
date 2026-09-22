@@ -2,7 +2,7 @@
 
 Go + SQLite HTTP service that stores write-once feedback from AI coding agents
 (frictions, review runs, events) plus two Bash skills: `agent-feedback`
-(submit/read, installed everywhere) and `feedback-triage` (process the queue).
+(submit/read, installed everywhere) and `agent-feedback-triage` (process the queue).
 
 This file is for agents **changing this repo**. If you only want to **use the
 running service**, you need one document: the skill's

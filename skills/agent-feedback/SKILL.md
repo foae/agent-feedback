@@ -1,6 +1,6 @@
 ---
 name: agent-feedback
-description: Report friction (what slowed you down) and other write-once telemetry to a self-hosted agent-feedback service, and read the queue back. Use when your instructions tell you to surface or submit friction, when you need to record a review run or a generic event, or when you need to list, inspect or mark processed submissions. Processing the queue end to end is the sibling feedback-triage skill.
+description: Report friction (what slowed you down) and other write-once telemetry to a self-hosted agent-feedback service, and read the queue back. Use when your instructions tell you to surface or submit friction, when you need to record a review run or a generic event, or when you need to list, inspect or mark processed submissions. Processing the queue end to end is the sibling agent-feedback-triage skill.
 license: MIT
 compatibility: Any harness that can run bash. Requires curl and jq, plus AGENT_FEEDBACK_URL and AGENT_FEEDBACK_API_KEY in the environment.
 metadata:
@@ -16,7 +16,7 @@ contract in the service repository's `docs/api.md`). This skill is one of two:
 | Skill | Role | Who runs it |
 |---|---|---|
 | **agent-feedback** (this) | submit and read | every agent, in every harness, as part of normal work |
-| [**feedback-triage**](../feedback-triage/SKILL.md) | process the queue | one agent, on demand, when a user asks to triage |
+| [**agent-feedback-triage**](../agent-feedback-triage/SKILL.md) | process the queue | one agent, on demand, when a user asks to triage |
 
 Three kinds of data, all write-once:
 
@@ -49,7 +49,7 @@ prints the payload and `{"status":"valid"}` without sending anything.
 
 Uninstall: flush or discard the spool (`bash scripts/query.sh --flush --limit 1`,
 or `rm -rf ~/.cache/agent-feedback`), delete this directory (and the sibling
-`feedback-triage` if installed) from every harness's skills location, and
+`agent-feedback-triage` if installed) from every harness's skills location, and
 remove the `AGENT_FEEDBACK_*` variables from shell profiles. Removing the
 service itself is described in the repository's `docs/operate.md`.
 
@@ -125,7 +125,7 @@ never print the API key, and send it via a mode-0600 header file, not argv.
 
 ## Process the queue
 
-Used by the feedback-triage skill and by any session closing a row it fixed.
+Used by the agent-feedback-triage skill and by any session closing a row it fixed.
 
 ```bash
 bash scripts/process.sh list                          # every unprocessed row, all pages; TSV: id family type machine category summary

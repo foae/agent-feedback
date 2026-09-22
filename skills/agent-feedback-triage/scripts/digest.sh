@@ -5,7 +5,7 @@
 # Usage: digest.sh [--out DIR] [--family friction]
 #
 # Without --out the digest lands in a freshly created
-# $TMPDIR/feedback-triage/<UTC timestamp>-XXXXXX directory, so two runs in the
+# $TMPDIR/agent-feedback-triage/<UTC timestamp>-XXXXXX directory, so two runs in the
 # same second never merge into one another's output. With --out the given path
 # is used as-is, and a non-empty directory is refused for the same reason.
 #
@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMON="$SCRIPT_DIR/../../agent-feedback/scripts/_common.sh"
-[ -f "$COMMON" ] || { echo "feedback-triage: sibling agent-feedback skill not found at $COMMON" >&2; exit 1; }
+[ -f "$COMMON" ] || { echo "agent-feedback-triage: sibling agent-feedback skill not found at $COMMON" >&2; exit 1; }
 # shellcheck source=../../agent-feedback/scripts/_common.sh
 . "$COMMON"
 
@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
            OUT="$2"; shift 2 ;;
     --family) [ $# -ge 2 ] || af_reject "$1 requires a value"
               FAMILY="$2"; shift 2 ;;
-    *) echo "feedback-triage: unknown flag $1" >&2
+    *) echo "agent-feedback-triage: unknown flag $1" >&2
        af_outcome "$(jq -cn --arg m "unknown flag $1" '{status:"rejected",message:$m}')"
        exit 1 ;;
   esac
@@ -45,17 +45,17 @@ af_require_deps
 af_require_key
 
 if [ -n "$OUT" ]; then
-  mkdir -p "$OUT" || { echo "feedback-triage: cannot create $OUT" >&2; exit 1; }
+  mkdir -p "$OUT" || { echo "agent-feedback-triage: cannot create $OUT" >&2; exit 1; }
   # Mixing a new pull into an old digest silently produces a wrong triage set.
   if [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
-    echo "feedback-triage: --out directory $OUT is not empty — refusing to mix digests" >&2
+    echo "agent-feedback-triage: --out directory $OUT is not empty — refusing to mix digests" >&2
     exit 1
   fi
 else
-  BASE="${TMPDIR:-/tmp}/feedback-triage"
-  mkdir -p "$BASE" || { echo "feedback-triage: cannot create $BASE" >&2; exit 1; }
+  BASE="${TMPDIR:-/tmp}/agent-feedback-triage"
+  mkdir -p "$BASE" || { echo "agent-feedback-triage: cannot create $BASE" >&2; exit 1; }
   OUT=$(mktemp -d "$BASE/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX") \
-    || { echo "feedback-triage: cannot create a digest directory under $BASE" >&2; exit 1; }
+    || { echo "agent-feedback-triage: cannot create a digest directory under $BASE" >&2; exit 1; }
 fi
 chmod 700 "$OUT"
 
@@ -69,9 +69,9 @@ while :; do
   [ -n "$before" ] && args+=(--data-urlencode "before_id=$before")
   af_request_get "/api/v1/submissions" "${args[@]}"
   if [ "$AF_HTTP_CODE" = 000 ]; then
-    echo "feedback-triage: service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL" >&2; rm -f "$AF_RESP"; exit 1
+    echo "agent-feedback-triage: service unreachable (curl exit $AF_CURL_EXIT) at $AF_URL" >&2; rm -f "$AF_RESP"; exit 1
   elif [ "$AF_HTTP_CODE" != 200 ]; then
-    echo "feedback-triage: HTTP $AF_HTTP_CODE: $(head -c 300 "$AF_RESP")" >&2; rm -f "$AF_RESP"; exit 1
+    echo "agent-feedback-triage: HTTP $AF_HTTP_CODE: $(head -c 300 "$AF_RESP")" >&2; rm -f "$AF_RESP"; exit 1
   fi
   [ -n "$total" ] || total=$(jq -r '.total // 0' "$AF_RESP")
   page_rows=$(jq -c '.submissions[]?' "$AF_RESP" | tee -a "$OUT/.rows.jsonl" | wc -l | tr -d ' ')
@@ -79,7 +79,7 @@ while :; do
   # empty page that still claims more would silently truncate the triage set.
   if ! next=$(af_pagination_next "$AF_RESP" "$before" "$page_rows"); then
     rm -f "$AF_RESP"
-    echo "feedback-triage: malformed pagination response" >&2
+    echo "agent-feedback-triage: malformed pagination response" >&2
     af_outcome '{"status":"error","message":"malformed pagination response"}'
     exit 1
   fi
@@ -102,7 +102,7 @@ jq -r --arg count "$count" --arg total "$total" --arg family "$FAMILY" '
   def trunc(n): if length > n then .[:n] + "…" else . end;
   def clean: gsub("[\\r\\n\\t]+"; " ");
   ( group_by(.payload_hash) | map(select(length > 1) | {(.[0].payload_hash): length}) | add // {} ) as $repeats
-  | "# feedback-triage digest\n",
+  | "# agent-feedback-triage digest\n",
     "family: \($family) · pulled: \($count) · server total: \($total) · exact-repeat groups: \($repeats | length)\n",
     ( sort_by(.id)
       | group_by(.payload.project // "(no project)")
@@ -123,9 +123,9 @@ jq -r --arg count "$count" --arg total "$total" --arg family "$FAMILY" '
     )
 ' "$OUT/index.json" > "$OUT/digest.md"
 
-echo "feedback-triage: pulled $count row(s) (server total $total) into $OUT" >&2
+echo "agent-feedback-triage: pulled $count row(s) (server total $total) into $OUT" >&2
 if [ "$contaminated" != 0 ]; then
-  echo "feedback-triage: $contaminated pulled row(s) already have processed_at set — pull contaminated" >&2
+  echo "agent-feedback-triage: $contaminated pulled row(s) already have processed_at set — pull contaminated" >&2
   printf '%s\n' "$OUT"
   exit 2
 fi

@@ -881,9 +881,9 @@ chk "process undo -> processed:false without resolution" "$(jq -r '
 if bash "$SCRIPTS/process.sh" 'done' abc >/dev/null 2>&1; then rc=0; else rc=$?; fi
 chk "process done abc -> exit 1" "$([ "$rc" = 1 ] && echo 1 || echo 0)"
 
-# ── feedback-triage digest.sh ────────────────────────────────────────────────
+# ── agent-feedback-triage digest.sh ────────────────────────────────────────────────
 
-TRIAGE_SCRIPTS="$TESTS_DIR/../../skills/feedback-triage/scripts"
+TRIAGE_SCRIPTS="$TESTS_DIR/../../skills/agent-feedback-triage/scripts"
 
 # 21. happy path: 3 unprocessed frictions served across two pages.
 set_list_rows 3
@@ -1230,7 +1230,7 @@ chk "review unknown flag -> rejected outcome, exit 1, no request" "$(jq -n \
   --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
   '($o|fromjson) as $j | if $j.status=="rejected" and ($j.message|test("unknown flag")) and $rc==1 and $b==$a then 1 else 0 end')"
 
-# ── feedback-triage digest.sh output directory ───────────────────────────────
+# ── agent-feedback-triage digest.sh output directory ───────────────────────────────
 
 # 42. Two digests in the same second must not land in the same directory, and
 # an existing non-empty --out is refused rather than mixed into.

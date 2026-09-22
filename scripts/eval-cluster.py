@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure feedback-triage cluster.py against labelled friction pairs. LIVE.
+"""Measure agent-feedback-triage cluster.py against labelled friction pairs. LIVE.
 
 Sends report text (category, summary, details, suggested_fix) to TypeSafe.
 Every labelled report's exact payload.context.git_remote must be approved with
@@ -26,7 +26,7 @@ from pathlib import Path
 import sys
 
 sys.dont_write_bytecode = True
-SCRIPT = Path(__file__).resolve().parents[1] / "skills/feedback-triage/scripts/cluster.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "skills/agent-feedback-triage/scripts/cluster.py"
 spec = importlib.util.spec_from_file_location("cluster", SCRIPT)
 cluster = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cluster)

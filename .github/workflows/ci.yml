@@ -66,10 +66,10 @@ jobs:
           cd skills/agent-feedback/scripts && shellcheck -x ./*.sh
       - name: shellcheck triage scripts
         run: |
-          if ls skills/feedback-triage/scripts/*.sh >/dev/null 2>&1; then
-            cd skills/feedback-triage/scripts && shellcheck -x ./*.sh
+          if ls skills/agent-feedback-triage/scripts/*.sh >/dev/null 2>&1; then
+            cd skills/agent-feedback-triage/scripts && shellcheck -x ./*.sh
           else
-            echo "no feedback-triage scripts yet, skipping"
+            echo "no agent-feedback-triage scripts yet, skipping"
           fi
       - name: hermetic client tests (mock server with isolated HOME)
         run: bash tests/skill/run-tests.sh

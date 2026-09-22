@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
-SCRIPT = Path(__file__).resolve().parents[2] / "skills/feedback-triage/scripts/cluster.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "skills/agent-feedback-triage/scripts/cluster.py"
 spec = importlib.util.spec_from_file_location("cluster", SCRIPT)
 cluster = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cluster)

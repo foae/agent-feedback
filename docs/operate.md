@@ -210,7 +210,7 @@ removing any service; the data is gone with the volume.
 
 ### Skills, on every machine that has them
 
-1. Find the installed copies: `ls -la ~/.claude/skills/agent-feedback ~/.claude/skills/feedback-triage ~/.agents/skills/agent-feedback ~/.agents/skills/feedback-triage 2>/dev/null`
+1. Find the installed copies: `ls -la ~/.claude/skills/agent-feedback ~/.claude/skills/agent-feedback-triage ~/.claude/skills/feedback-triage ~/.agents/skills/agent-feedback ~/.agents/skills/agent-feedback-triage ~/.agents/skills/feedback-triage 2>/dev/null`
    and any other harness skill directory you use. Entries may be symlinks into
    a shared checkout; remove the links, then the checkout if nothing else uses it.
 2. Flush or discard unsent payloads first: `bash <skill-dir>/scripts/query.sh --flush --limit 1`

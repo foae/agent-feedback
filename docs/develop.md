@@ -6,18 +6,18 @@ How to change the service and the skills, verify, and release. Read
 ## Layout
 
 ```
-cmd/feedback/            main: `serve` (default), `import <jsonl>`, `backup <dest.db>`
-internal/api/            HTTP: mux, middleware (auth, recovery, request id, log, metrics, body limits), handlers, DTOs
-internal/core/           validation, per-family canonical hashing, create/list/get/processed/export
-internal/store/          SQLite: open + pragmas, embedded forward-only migrations, hand-written SQL
-internal/canonjson/      canonical JSON for event hashing
-infra/agent-feedback/    compose stacks (local build, image-based deploy) and .env.example
-scripts/                 e2e.sh (live contract suite), deploy.sh, export-v1-postgres.sh, release.py,
-                         eval-cluster.py (live cluster.py calibration; discloses report text)
-skills/agent-feedback/   submit/query/process client skill (copied as-is into a harness; no tests inside)
-skills/feedback-triage/  processor skill (SKILL.md, digest.sh, optional cluster.py)
-tests/skill/             hermetic tests for both skills' scripts (mock server, isolated HOME)
-docs/                    api.md (contract), operate.md, develop.md, security.md, releases.md
+cmd/feedback/                   main: `serve` (default), `import <jsonl>`, `backup <dest.db>`
+internal/api/                   HTTP: mux, middleware (auth, recovery, request id, log, metrics, body limits), handlers, DTOs
+internal/core/                  validation, per-family canonical hashing, create/list/get/processed/export
+internal/store/                 SQLite: open + pragmas, embedded forward-only migrations, hand-written SQL
+internal/canonjson/             canonical JSON for event hashing
+infra/agent-feedback/           compose stacks (local build, image-based deploy) and .env.example
+scripts/                        e2e.sh (live contract suite), deploy.sh, export-v1-postgres.sh, release.py,
+                                eval-cluster.py (live cluster.py calibration; discloses report text)
+skills/agent-feedback/          submit/query/process client skill (copied as-is into a harness; no tests inside)
+skills/agent-feedback-triage/   processor skill (SKILL.md, digest.sh, optional cluster.py)
+tests/skill/                    hermetic tests for both skills' scripts (mock server, isolated HOME)
+docs/                           api.md (contract), operate.md, develop.md, security.md, releases.md
 ```
 
 Go toolchain and module versions are pinned in `go.mod`. Tools: `just`,

@@ -9,14 +9,14 @@ Two parts:
 | Part | What it is | Where |
 |---|---|---|
 | **The service** | HTTP API that stores write-once submissions (frictions, review runs, events) and a processed mark | this repository, one binary |
-| **Two skills** | `agent-feedback`: submit and read, installed for every harness on every machine. `feedback-triage`: process the queue on demand | [`skills/`](skills/) |
+| **Two skills** | `agent-feedback`: submit and read, installed for every harness on every machine. `agent-feedback-triage`: process the queue on demand | [`skills/`](skills/) |
 
 ## Start here
 
 | You want to | Read |
 |---|---|
 | Install the skill and file feedback from an agent | [`skills/agent-feedback/SKILL.md`](skills/agent-feedback/SKILL.md) |
-| Triage the queue | [`skills/feedback-triage/SKILL.md`](skills/feedback-triage/SKILL.md) |
+| Triage the queue | [`skills/agent-feedback-triage/SKILL.md`](skills/agent-feedback-triage/SKILL.md) |
 | Call the API directly | [`docs/api.md`](docs/api.md) |
 | Run, deploy, back up, migrate | [`docs/operate.md`](docs/operate.md) |
 | Uninstall the skills, the service, or a 1.x PostgreSQL stack | [`docs/operate.md#uninstall`](docs/operate.md#uninstall) |

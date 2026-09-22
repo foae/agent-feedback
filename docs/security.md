@@ -37,7 +37,7 @@ not a server feature. It sends selected report prose only with explicit
 per-repository approval; a key alone never enables it. Reports can contain
 secrets in prose, so inspect the local preview before sending. Advice cannot
 authorize edits or processed marks. The
-[triage workflow](../skills/feedback-triage/SKILL.md#optional-typesafe-clustering-advice)
+[triage workflow](../skills/agent-feedback-triage/SKILL.md#optional-typesafe-clustering-advice)
 defines the fields, consent rules and manual fallback.
 
 ## Data at rest
