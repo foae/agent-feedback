@@ -53,6 +53,9 @@ need a new version; corrections to release prose need no new tag.
   links and prompts that name `skills/feedback-triage`, and remove the old
   copy ([operate.md](operate.md#uninstall) lists both names). Digests move to
   `${TMPDIR:-/tmp}/agent-feedback-triage/`. No service/API or storage changes.
+- The triage skill is direct invocation only: `disable-model-invocation: true`
+  (Claude Code) and a description that forbids loading it from phrasing
+  about the queue. Invoke it as `/agent-feedback-triage` or by name.
 - `cluster.py` batches comparisons: up to 8 reports per request, every pair
   asked once over a shared state, so 24 reports need 15 requests instead of
   276 (which exceeded the old cap and skipped advice). One request per pair

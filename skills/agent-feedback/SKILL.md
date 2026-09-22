@@ -1,6 +1,6 @@
 ---
 name: agent-feedback
-description: Report friction (what slowed you down) and other write-once telemetry to a self-hosted agent-feedback service, and read the queue back. Use when your instructions tell you to surface or submit friction, when you need to record a review run or a generic event, or when you need to list, inspect or mark processed submissions. Processing the queue end to end is the sibling agent-feedback-triage skill.
+description: Report friction (what slowed you down) and other write-once telemetry to a self-hosted agent-feedback service, and read the queue back. Use when your instructions tell you to surface or submit friction, when you need to record a review run or a generic event, or when you need to list, inspect or mark processed submissions. Processing the queue end to end is the sibling agent-feedback-triage skill, which only the user invokes.
 license: MIT
 compatibility: Any harness that can run bash. Requires curl and jq, plus AGENT_FEEDBACK_URL and AGENT_FEEDBACK_API_KEY in the environment.
 metadata:
@@ -16,7 +16,7 @@ contract in the service repository's `docs/api.md`). This skill is one of two:
 | Skill | Role | Who runs it |
 |---|---|---|
 | **agent-feedback** (this) | submit and read | every agent, in every harness, as part of normal work |
-| [**agent-feedback-triage**](../agent-feedback-triage/SKILL.md) | process the queue | one agent, on demand, when a user asks to triage |
+| [**agent-feedback-triage**](../agent-feedback-triage/SKILL.md) | process the queue | on demand, only when the user invokes it by name |
 
 Three kinds of data, all write-once:
 

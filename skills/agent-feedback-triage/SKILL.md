@@ -1,8 +1,9 @@
 ---
 name: agent-feedback-triage
-description: Process the agent-feedback queue end to end - pull every unprocessed friction, cluster by root cause, verify each cluster read-only, present one consolidated summary, interview the user with recommended actions first, then act and mark rows processed with a resolution. EXPLICIT INVOCATION ONLY - run when the user invokes /agent-feedback-triage or asks to triage, process or work through the agent-feedback queue. Requires the agent-feedback skill installed beside this one and AGENT_FEEDBACK_URL + AGENT_FEEDBACK_API_KEY.
+description: Process the agent-feedback queue end to end - pull every unprocessed friction, cluster by root cause, verify each cluster read-only, present one consolidated summary, interview the user with recommended actions first, then act and mark rows processed with a resolution. EXPLICIT INVOCATION ONLY - run only when the user invokes /agent-feedback-triage or names this skill; never load it on your own from phrasing about the queue. Requires the agent-feedback skill installed beside this one and AGENT_FEEDBACK_URL + AGENT_FEEDBACK_API_KEY.
 license: MIT
 compatibility: Any harness that can run bash. Needs curl, jq, git and the sibling agent-feedback skill installed beside this one. Optional advisory clustering needs Python 3.9+ and a machine-local TYPESAFE_API_KEY. Uses a structured multi-select question tool when the harness has one; falls back to a numbered list otherwise.
+disable-model-invocation: true
 metadata:
   author: foae
   version: "2.0"
