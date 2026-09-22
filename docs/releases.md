@@ -56,6 +56,9 @@ need a new version; corrections to release prose need no new tag.
 - The triage skill is direct invocation only: `disable-model-invocation: true`
   (Claude Code) and a description that forbids loading it from phrasing
   about the queue. Invoke it as `/agent-feedback-triage` or by name.
+- Docs: install guidance for the triage skill, the rule to re-measure after
+  any `cluster.py` prompt, threshold or batching change, and the eval
+  script's disclosure boundary in [security.md](security.md).
 - `cluster.py` batches comparisons: up to 8 reports per request, every pair
   asked once over a shared state, so 24 reports need 15 requests instead of
   276 (which exceeded the old cap and skipped advice). One request per pair

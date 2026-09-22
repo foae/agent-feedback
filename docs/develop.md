@@ -32,6 +32,7 @@ just run-local      # serve on 127.0.0.1:8090 with a temp database
 bash scripts/e2e.sh <API_KEY> [BASE_URL]      # live contract suite against a running service
 bash tests/skill/run-tests.sh                 # hermetic client tests (mock server, needs python3)
 shellcheck -x -P SCRIPTDIR skills/*/scripts/*.sh tests/skill/run-tests.sh
+python3 scripts/eval-cluster.py <export.ndjson> <labels.json> --allow-repo <remote>... [--live]   # cluster.py calibration
 ```
 
 ## Rules that are not visible in the code
@@ -57,6 +58,15 @@ shellcheck -x -P SCRIPTDIR skills/*/scripts/*.sh tests/skill/run-tests.sh
 - **Skill directories are copied as-is into harnesses.** No tests or tooling inside
   `skills/*/`; tests live in `tests/skill/`. Script comments state rules, not
   history: no dates, incident numbers or machine names.
+- **Clustering changes are measured.** Changing `cluster.py`'s instructions,
+  criteria, threshold or batching means rerunning `scripts/eval-cluster.py`
+  and updating the calibration paragraph in the triage SKILL.md (the one
+  dated statement a skill carries). Ship a prompt change only when the eval
+  supports it. The eval discloses report text: it needs the queue owner's
+  approval for every exact remote (`--allow-repo`), and without `--live` it
+  only lists what would be sent.
+- **Triage is user-invoked only.** Keep `disable-model-invocation: true` and
+  a description that forbids loading it from phrasing about the queue.
 - **Compatibility.** Everything in API 1.0 keeps working. Additive changes
   bump the API minor in api.md's "Changes" section; anything else is a major
   release.

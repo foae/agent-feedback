@@ -44,6 +44,11 @@ AGENT_FEEDBACK_SESSION_ID optional: overrides session-id detection
 AGENT_FEEDBACK_REVIEW_DIRS optional: colon-separated review run-directory roots for submit-review.sh --sweep
 ```
 
+The sibling `agent-feedback-triage` skill installs the same way, beside this
+one, and only where someone processes the queue. It runs only when the user
+invokes it (`disable-model-invocation: true`). A copy named `feedback-triage`
+is an older version of it: remove that copy.
+
 Check the install: `bash scripts/submit-friction.sh --category test --summary "install check" --model <your model> --dry-run`
 prints the payload and `{"status":"valid"}` without sending anything.
 

@@ -9,7 +9,7 @@ Two parts:
 | Part | What it is | Where |
 |---|---|---|
 | **The service** | HTTP API that stores write-once submissions (frictions, review runs, events) and a processed mark | this repository, one binary |
-| **Two skills** | `agent-feedback`: submit and read, installed for every harness on every machine. `agent-feedback-triage`: process the queue on demand | [`skills/`](skills/) |
+| **Two skills** | `agent-feedback`: submit and read, installed for every harness on every machine. `agent-feedback-triage`: process the queue, only when the user invokes it (`/agent-feedback-triage`) | [`skills/`](skills/) |
 
 ## Start here
 

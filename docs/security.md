@@ -36,7 +36,10 @@ The triage skill's optional TypeSafe helper is a separate disclosure boundary,
 not a server feature. It sends selected report prose only with explicit
 per-repository approval; a key alone never enables it. Reports can contain
 secrets in prose, so inspect the local preview before sending. Advice cannot
-authorize edits or processed marks. The
+authorize edits or processed marks. A batched request shares one state
+among up to 8 reports, all from approved repositories. `scripts/eval-cluster.py`
+is the same boundary for calibration: it sends nothing unless every labelled
+report's exact remote is approved and `--live` is given. The
 [triage workflow](../skills/agent-feedback-triage/SKILL.md#optional-typesafe-clustering-advice)
 defines the fields, consent rules and manual fallback.
 
