@@ -12,7 +12,8 @@ internal/core/           validation, per-family canonical hashing, create/list/g
 internal/store/          SQLite: open + pragmas, embedded forward-only migrations, hand-written SQL
 internal/canonjson/      canonical JSON for event hashing
 infra/agent-feedback/    compose stacks (local build, image-based deploy) and .env.example
-scripts/                 e2e.sh (live contract suite), deploy.sh, export-v1-postgres.sh, release.py
+scripts/                 e2e.sh (live contract suite), deploy.sh, export-v1-postgres.sh, release.py,
+                         eval-cluster.py (live cluster.py calibration; discloses report text)
 skills/agent-feedback/   submit/query/process client skill (copied as-is into a harness; no tests inside)
 skills/feedback-triage/  processor skill (SKILL.md, digest.sh, optional cluster.py)
 tests/skill/             hermetic tests for both skills' scripts (mock server, isolated HOME)

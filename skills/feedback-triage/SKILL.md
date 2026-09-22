@@ -5,7 +5,7 @@ license: MIT
 compatibility: Any harness that can run bash. Needs curl, jq, git and the sibling agent-feedback skill installed beside this one. Optional advisory clustering needs Python 3.9+ and a machine-local TYPESAFE_API_KEY. Uses a structured multi-select question tool when the harness has one; falls back to a numbered list otherwise.
 metadata:
   author: foae
-  version: "1.1"
+  version: "1.2"
 ---
 
 # feedback-triage
@@ -109,10 +109,21 @@ The JSON artifact retains every ID and the SHA-256 of the original index.
 Compare that hash before reusing advice against a changed digest. `groups`
 are suggestions, **not** validated duplicate verdicts. Every pair in a
 multi-report group must independently pass both probability and confidence
-thresholds (0.8); a chain of pairwise matches is not enough. These are
-conservative starting thresholds, not a measured accuracy guarantee.
+thresholds (0.8); a chain of pairwise matches is not enough.
 `comparisons` retains each answer and its probabilities, including uncertain
 and cross-group matches, for coordinator inspection.
+
+Calibration (2026-09-22, one run, with `scripts/eval-cluster.py` from the
+agent-feedback repository): 32 processed frictions, 112 pairs, 5 labelled same-defect pairs
+(2 of them a compound report against one of its halves), 107 different. At
+0.8, no different pair was grouped in any mode; the 3 non-compound duplicates
+scored 0.99 to 1.0; the highest different pair scored 0.18 (two defects in
+the same release-recovery flow). Batched (8 reports) agreed with one request
+per pair on 111 of 112 suggestions and grouped 1 of the 2 compound pairs;
+one request per pair grouped neither. Five positives is a small sample:
+treat these numbers as evidence the threshold is conservative, not as a
+precision guarantee. Compound reports remain the weak spot; split them
+manually.
 
 Use the full original reports for phase 3, not just the proposed groups.
 Resolve uncertain matches manually; no model answer may dismiss a report,
@@ -121,15 +132,25 @@ unassessed, not necessarily unique. All IDs must still appear exactly once
 in the coordinator's ledger.
 
 `status: skipped` means no requests were made (no consent, no pairs, missing
-key, or the pair limit). `partial` keeps completed comparisons and marks the
-failed pair unassessed; all untouched pairs remain manual. API/shape failures
-stop further requests, never invalidate the digest. `completed` means only
-that all candidate pairs were assessed, not that the advice is correct.
-The default maximum is 200 pairs, one bounded request per pair; exceeding it
-skips the whole advisory run. Raise `--max-pairs N` deliberately or cluster
-manually. `--timeout N` bounds each request (default 15 seconds), not the whole
-run. Invalid input exits 1; valid advisory output, including skipped/partial,
-exits 0. Continue the original workflow when advice is unavailable.
+key, or the request limit). `partial` keeps completed comparisons and marks the
+failed pairs unassessed; all untouched pairs remain manual. A failed request
+or invalid response stops further requests; one invalid answer inside a batch
+marks only that pair. A pair too large for the model is marked
+`request_too_large` without a request. Failures never invalidate the digest.
+`completed` means only that all candidate pairs were assessed, not that the
+advice is correct.
+
+By default each request carries up to 8 reports and asks all their pairs at
+once (`--batch-size 8`); 24 reports need 15 requests. Chunks hold an even
+number of reports, so an odd size rounds down and any size below 4 means one
+request per pair. A chunk too large for the model's budget also falls back to
+one request per pair. `planned_requests` in the output
+(dry runs included) shows the count. Exceeding `--max-requests` (default
+200) skips the whole advisory run; raise it deliberately or cluster
+manually. `--timeout N` bounds each request (default 15 seconds), not the
+whole run. Invalid input exits 1; valid advisory output, including
+skipped/partial, exits 0. Continue the original workflow when advice is
+unavailable.
 
 ## Phase 3: validate each cluster, read-only
 
