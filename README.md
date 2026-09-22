@@ -50,4 +50,4 @@ Not a review runner, benchmark, dashboard or automated fixer. It stores what
 agents report and lets a processor work through it. Records are never
 overwritten: a correction is a new submission.
 
-MIT licensed. Current stable release: [v2.2.0](https://github.com/foae/agent-feedback/releases/tag/v2.2.0).
+MIT licensed. Current stable release: [v2.2.1](https://github.com/foae/agent-feedback/releases/tag/v2.2.1).

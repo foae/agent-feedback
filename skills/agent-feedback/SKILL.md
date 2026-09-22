@@ -45,8 +45,8 @@ AGENT_FEEDBACK_REVIEW_DIRS optional: colon-separated review run-directory roots 
 AGENT_FEEDBACK_TRIAGE_ROOTS optional, triage only: colon-separated directories holding local checkouts
 ```
 
-The sibling `agent-feedback-triage` skill installs the same way, beside this
-one, and only where someone processes the queue. It runs only when the user
+The sibling `agent-feedback-triage` skill installs the same way (the whole
+directory, including `reference/`), beside this one, and only where someone processes the queue. It runs only when the user
 invokes it (`disable-model-invocation: true`).
 
 Check the install: `bash scripts/submit-friction.sh --category test --summary "install check" --model <your model> --dry-run`

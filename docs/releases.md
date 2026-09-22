@@ -48,6 +48,32 @@ that version. Rewrite the section's relative links to repo-root paths
 repository root, not `docs/`. Corrections to source
 need a new version; corrections to release prose need no new tag.
 
+## v2.2.1 — Documentation sweep
+
+Docs and skill documentation only; the service and scripts behave as in
+v2.2.0.
+
+- **Skill `agent-feedback-triage` 2.1**: the optional clustering contract
+  moved to `reference/clustering.md`, read only when clustering is used, and
+  repeated rules were collapsed: SKILL.md is a third shorter per invocation.
+  Install the whole directory, including `reference/`. Resolutions now start
+  with their verdict (`FIXED`, `INVALID`, `DUPLICATE-OF-<id>`). Fixed: the
+  close-out commands' path to the sibling skill, digest exit codes, the
+  meaning of `unchanged` versus `updated`, and cluster.py's statuses, reasons
+  and exit codes.
+- **Skill `agent-feedback`** (contract unchanged): corrected the `machine`
+  override, `--sweep` age/lock/outcome behaviour, backlog-warning scope, TSV
+  column 5, `slots` usage, 1xx/3xx outcomes, export digest tools, and added
+  `AGENT_FEEDBACK_TRIAGE_ROOTS`.
+- [api.md](api.md) states its version (1.1), the non-JSON responses and the
+  `include=payload` row shape.
+- [operate.md](operate.md): the retention purge runs as root, backups create
+  their directory, `openssl` and `DEPLOY_DIR` are documented, and uninstall
+  covers the triage variables.
+- `CLAUDE.md` routes to [develop.md](develop.md), the single home for
+  commands, rules and gates; the README quickstart checks out the latest tag
+  and keeps an existing key.
+
 ## v2.2.0 — Triage skill renamed; batched, measured clustering
 
 - **Skill `feedback-triage` is now `agent-feedback-triage` 2.0.** The

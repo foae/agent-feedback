@@ -41,7 +41,7 @@ authorize edits or processed marks. A batched request shares one state
 among up to 8 reports, all from approved repositories. `scripts/eval-cluster.py`
 is the same boundary for calibration: it sends nothing unless every labelled
 report's exact remote is approved and `--live` is given. The
-[triage workflow](../skills/agent-feedback-triage/SKILL.md#optional-typesafe-clustering-advice)
+[clustering reference](../skills/agent-feedback-triage/reference/clustering.md)
 defines the fields, consent rules and manual fallback.
 
 ## Data at rest

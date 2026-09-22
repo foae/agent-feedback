@@ -15,7 +15,7 @@ infra/agent-feedback/           compose stacks (local build, image-based deploy)
 scripts/                        e2e.sh (live contract suite), deploy.sh, export-v1-postgres.sh, release.py,
                                 eval-cluster.py (live cluster.py calibration; discloses report text)
 skills/agent-feedback/          submit/query/process client skill (copied as-is into a harness; no tests inside)
-skills/agent-feedback-triage/   processor skill (SKILL.md, digest.sh, optional cluster.py)
+skills/agent-feedback-triage/   processor skill (SKILL.md, digest.sh; optional cluster.py + reference/clustering.md)
 tests/skill/                    hermetic tests for both skills' scripts (mock server, isolated HOME)
 docs/                           api.md (contract), operate.md, develop.md, security.md, releases.md,
                                 agent-usage.md (redirect for API 1.0 links)
@@ -64,8 +64,9 @@ python3 scripts/eval-cluster.py <export.ndjson> <labels.json> --allow-repo <remo
   history: no dates, incident numbers or machine names.
 - **Clustering changes are measured.** Changing `cluster.py`'s instructions,
   criteria, threshold or batching means rerunning `scripts/eval-cluster.py`
-  and updating the calibration paragraph in the triage SKILL.md (the one
-  dated statement a skill carries). Ship a prompt change only when the eval
+  and updating the calibration section of
+  `skills/agent-feedback-triage/reference/clustering.md` (the one dated
+  statement a skill carries). Ship a prompt change only when the eval
   supports it. The eval discloses report text: it needs the queue owner's
   approval for every exact remote (`--allow-repo`), and without `--live` it
   only lists what would be sent.
