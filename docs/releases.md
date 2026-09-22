@@ -46,6 +46,29 @@ that version. Rewrite the section's relative links to repo-root paths
 repository root, not `docs/`. Corrections to source
 need a new version; corrections to release prose need no new tag.
 
+## v2.2.0 — Triage skill renamed; batched, measured clustering
+
+- **Skill `feedback-triage` is now `agent-feedback-triage` 2.0.** The
+  invocation name and the install directory change: update installers,
+  links and prompts that name `skills/feedback-triage`, and remove the old
+  copy ([operate.md](operate.md#uninstall) lists both names). Digests move to
+  `${TMPDIR:-/tmp}/agent-feedback-triage/`. No service/API or storage changes.
+- `cluster.py` batches comparisons: up to 8 reports per request, every pair
+  asked once over a shared state, so 24 reports need 15 requests instead of
+  276 (which exceeded the old cap and skipped advice). One request per pair
+  remains the fallback for batch sizes below 4 and for chunks over the
+  model's token budget; a pair too large alone is marked unassessed without
+  a request. One invalid answer in a batch marks only that pair.
+- **`--max-pairs` is replaced by `--max-requests`** (default 200); the old
+  flag is rejected because its unit changed. New `--batch-size` (default 8).
+- Probability sums tolerate the model's per-option two-decimal rounding.
+- Calibration recorded in the skill: on 112 labelled pairs, no different
+  pair was grouped at the 0.8 threshold; consent, dry-run, key handling and
+  complete-link grouping are unchanged. `scripts/eval-cluster.py` repeats
+  the measurement and refuses to send any report whose exact remote was not
+  approved with `--allow-repo`.
+- Go module dependency updates (indirect only).
+
 ## v2.1.0 — Optional advisory triage clustering
 
 - **Skill `feedback-triage` 1.1** adds a Python 3.9+ helper that compares
