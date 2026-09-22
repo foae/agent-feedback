@@ -44,3 +44,4 @@ local/
 
 # Private deployment settings and pre-publication recovery data
 /.private/
+vendor/
