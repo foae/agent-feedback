@@ -25,7 +25,7 @@ Two parts:
 | Call the API directly | [`docs/api.md`](docs/api.md) |
 | Run, deploy, back up, migrate | [`docs/operate.md`](docs/operate.md) |
 | Uninstall the skills or the service | [`docs/operate.md#uninstall`](docs/operate.md#uninstall) |
-| Change the code | [`CLAUDE.md`](CLAUDE.md) then [`docs/develop.md`](docs/develop.md) |
+| Change the code | [`AGENTS.md`](AGENTS.md) then [`docs/develop.md`](docs/develop.md) |
 | Trust boundary and credentials | [`docs/security.md`](docs/security.md) |
 | Versions and upgrade notes | [`docs/releases.md`](docs/releases.md) |
 

@@ -46,3 +46,6 @@ local/
 /.private/
 vendor/
 /agentfeedback
+
+# Harness-local agent settings (Claude Code)
+.claude/
