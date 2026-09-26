@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Submit a friction report to the agent-feedback service — what slowed the
+# Submit a friction report to the AgentFeedback service — what slowed the
 # agent down, so it can be triaged into tooling/doc improvements.
 #
 # Usage:

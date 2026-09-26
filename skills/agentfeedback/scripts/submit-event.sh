@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Submit a generic write-once event to the agent-feedback service: a free-form
+# Submit a generic write-once event to the AgentFeedback service: a free-form
 # JSON payload under a producer-chosen (kind, key). Nothing in the service
 # interprets the payload.
 #

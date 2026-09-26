@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 // TimeFormat is the wire format for every timestamp: RFC 3339, UTC,

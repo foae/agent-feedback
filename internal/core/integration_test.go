@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 func reviewInput(runID string) CreateReviewInput {

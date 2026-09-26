@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Hermetic test suite for the agent-feedback skill scripts. No running stack
+# Hermetic test suite for the AgentFeedback skill scripts. No running stack
 # needed: a Python mock server plays the service, HOME is a temp dir so the
 # spool never touches the real cache.
 #
-# Lives OUTSIDE skills/agent-feedback/ on purpose: the skill directory is
+# Lives OUTSIDE skills/agentfeedback/ on purpose: the skill directory is
 # copied as-is into a harness, and test tooling must never travel with it.
 #
 # Portable to macOS and Linux: no GNU-only flags (no `touch -d`), and every
@@ -15,7 +15,7 @@
 set -u
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPTS="$TESTS_DIR/../../skills/agent-feedback/scripts"
+SCRIPTS="$TESTS_DIR/../../skills/agentfeedback/scripts"
 
 WORK=$(mktemp -d)
 WORK=$(cd "$WORK" && pwd -P)   # canonical: /private/var/... on macOS
@@ -23,7 +23,7 @@ STATE="$WORK/state"
 mkdir -p "$STATE"
 export HOME="$WORK/home"
 mkdir -p "$HOME"
-SPOOL="$HOME/.cache/agent-feedback/spool"
+SPOOL="$HOME/.cache/agentfeedback/spool"
 
 python3 "$TESTS_DIR/mock_server.py" "$STATE" &
 SERVER_PID=$!
@@ -354,7 +354,7 @@ chk "context auto-collected (non-git): base keys, no git keys" "$(jq -r --arg cw
   if (.body.context.occurred_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))
   and .body.context.cwd==$cwd
   and (.body.context.os | length > 0) and (.body.context.arch | length > 0)
-  and .body.context.client_version=="3.0"
+  and .body.context.client_version=="4.0"
   and (.body.context | has("git_commit") | not)
   and (.body.context | has("session_id") | not)
   then 1 else 0 end' <<<"$req")"
@@ -457,7 +457,7 @@ chk "AGENT_FEEDBACK_MODEL fallback for coordinator_model" \
 
 set_mode created
 # 20. happy path: 201 -> submitted, payload sent verbatim, key defaulted
-out=$(printf '%s' '{"service":"agent-feedback","ok":true,"n":3}' \
+out=$(printf '%s' '{"service":"agentfeedback","ok":true,"n":3}' \
   | bash "$SCRIPTS/submit-event.sh" --kind deploy --stdin --model m 2>/dev/null)
 rc=$?
 o=$(outcome "$out")
@@ -535,11 +535,11 @@ export AGENT_FEEDBACK_REVIEW_DIRS="$RUN_BASE"
 cat >"$RUN_DIR/meta.json" <<'JSON'
 {"machine":"testmach","skill":"review-panel","run_ts":"20260730-101010",
  "caller":"claude-fable-5",
- "slots":{"gpt56":{"label":"GPT-5.6-Sol"},"kimi":{"label":"Kimi-K3"}}}
+ "slots":{"gpt56":{"label":"GPT-5.6-Sol"},"model-x":{"label":"Model-X"}}}
 JSON
 printf 'slot\tmodel\tstatus\tduration_s\tbytes\n' >"$RUN_DIR/summary.tsv"
 printf 'gpt56\topenai-codex/gpt-5.6-sol\tcompleted\t354\t2392\n' >>"$RUN_DIR/summary.tsv"
-printf 'kimi\ttelnyx/moonshotai/Kimi-K3\ttimeout\t\t\n' >>"$RUN_DIR/summary.tsv"
+printf 'model-x\texample/model-x\ttimeout\t\t\n' >>"$RUN_DIR/summary.tsv"
 printf '20260730-101010\tx\tGPT-5.6-Sol\t5\t2\t0\tsolid\n' >"$RUN_BASE/scorecards.tsv"
 
 # 9. direct submit: run_id join, scores joined by label, empty duration omitted
@@ -714,7 +714,7 @@ chk "sweep without configured dirs warns and sends nothing" \
 
 # 12g. Sweep recovers locks without metadata or with corrupt metadata by
 # directory mtime, while a live owner remains protected even past the threshold.
-LOCK="$HOME/.cache/agent-feedback/sweep.lock"
+LOCK="$HOME/.cache/agentfeedback/sweep.lock"
 mkdir -p "$(dirname "$LOCK")"
 rm -rf "$LOCK"
 mkdir "$LOCK"
@@ -881,9 +881,9 @@ chk "process undo -> processed:false without resolution" "$(jq -r '
 if bash "$SCRIPTS/process.sh" 'done' abc >/dev/null 2>&1; then rc=0; else rc=$?; fi
 chk "process done abc -> exit 1" "$([ "$rc" = 1 ] && echo 1 || echo 0)"
 
-# ── agent-feedback-triage digest.sh ────────────────────────────────────────────────
+# ── agentfeedback-triage digest.sh ────────────────────────────────────────────────
 
-TRIAGE_SCRIPTS="$TESTS_DIR/../../skills/agent-feedback-triage/scripts"
+TRIAGE_SCRIPTS="$TESTS_DIR/../../skills/agentfeedback-triage/scripts"
 
 # 21. happy path: 3 unprocessed frictions served across two pages.
 set_list_rows 3
@@ -1230,7 +1230,7 @@ chk "review unknown flag -> rejected outcome, exit 1, no request" "$(jq -n \
   --arg o "$(outcome "$out")" --argjson rc "$rc" --argjson b "$before" --argjson a "$(log_len)" \
   '($o|fromjson) as $j | if $j.status=="rejected" and ($j.message|test("unknown flag")) and $rc==1 and $b==$a then 1 else 0 end')"
 
-# ── agent-feedback-triage digest.sh output directory ───────────────────────────────
+# ── agentfeedback-triage digest.sh output directory ───────────────────────────────
 
 # 42. Two digests in the same second must not land in the same directory, and
 # an existing non-empty --out is refused rather than mixed into.

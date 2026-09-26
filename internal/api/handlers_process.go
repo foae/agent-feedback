@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/foae/agent-feedback/internal/core"
+	"github.com/agentfeedback/agentfeedback/internal/core"
 )
 
 // handleSetProcessed handles POST /api/v1/submissions/processed — the batch

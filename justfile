@@ -1,6 +1,6 @@
-# Build the service binary to bin/feedback.
+# Build the service binary to bin/agentfeedback.
 build:
-    go build -o bin/feedback ./cmd/feedback
+    go build -o bin/agentfeedback ./cmd/agentfeedback
 
 # Run all checks: fmt, vet, tidy, build. The pre-commit gate.
 check: fmt vet tidy build
@@ -24,14 +24,14 @@ test:
 # Run locally against a database in ./local (created on demand).
 run-local: build
     mkdir -p local
-    DATABASE_PATH=${DATABASE_PATH:-local/feedback.db} \
+    DATABASE_PATH=${DATABASE_PATH:-local/agentfeedback.db} \
     HTTP_LISTEN_ADDR=${HTTP_LISTEN_ADDR:-127.0.0.1:8090} \
     API_KEY=${API_KEY:-local-dev-key} \
-    ./bin/feedback
+    ./bin/agentfeedback
 
-# Build the Docker image tagged agent-feedback.
+# Build the Docker image tagged agentfeedback.
 docker-build:
-    docker build -t agent-feedback .
+    docker build -t agentfeedback .
 
 # Remove build artifacts.
 clean:

@@ -13,11 +13,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/foae/agent-feedback/internal/core"
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/core"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
-// v1Records are in the shape scripts/export-v1-postgres.sh emits: family
+// v1Records are in the shape a legacy export-format-1 producer emits: family
 // derived from submission_type, resolution always null, and — for rows written
 // before hashing existed — payload_hash null.
 var v1Records = []string{
@@ -62,7 +62,7 @@ func writeExportFile(t *testing.T, dir string, header string, records []string, 
 	return path
 }
 
-const v1Header = `{"export_format":1,"family":null,"since":null,"exported_at":"2026-08-02T00:00:00.000000Z","source":"agent-feedback-1.x-postgres"}`
+const v1Header = `{"export_format":1,"family":null,"since":null,"exported_at":"2026-08-02T00:00:00.000000Z","source":"legacy-export"}`
 
 func openDB(t *testing.T, path string) *store.DB {
 	t.Helper()
@@ -78,7 +78,7 @@ func openDB(t *testing.T, path string) *store.DB {
 
 func TestImport_V1Export(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "feedback.db")
+	dbPath := filepath.Join(dir, "agentfeedback.db")
 	t.Setenv("DATABASE_PATH", dbPath)
 
 	// The fixture's review row carries a placeholder hash, as a hand-built v1
@@ -177,7 +177,7 @@ func TestImport_V1Export(t *testing.T) {
 
 func TestImport_ReservesIDsAndRefusesNonEmpty(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "feedback.db")
+	dbPath := filepath.Join(dir, "agentfeedback.db")
 	t.Setenv("DATABASE_PATH", dbPath)
 
 	path := writeExportFile(t, dir, v1Header, v1Records, true, "")
@@ -259,7 +259,7 @@ func TestImport_RejectsBrokenStreams(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			dbPath := filepath.Join(dir, "feedback.db")
+			dbPath := filepath.Join(dir, "agentfeedback.db")
 			t.Setenv("DATABASE_PATH", dbPath)
 
 			path := writeExportFile(t, dir, tc.header, tc.records, tc.terminator, tc.digest)
@@ -456,7 +456,7 @@ func frictionRecord(id int64, summary string) string {
 // a payload that merely contains export_complete / export_format is data.
 func TestImport_RecordWhosePayloadLooksLikeAHeaderOrTerminator(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "feedback.db")
+	dbPath := filepath.Join(dir, "agentfeedback.db")
 	t.Setenv("DATABASE_PATH", dbPath)
 
 	records := []string{eventRecord(1, "k1", `{"export_complete":true,"export_format":1}`)}
@@ -480,7 +480,7 @@ func TestImport_RecordWhosePayloadLooksLikeAHeaderOrTerminator(t *testing.T) {
 
 func TestImport_TerminatorWithoutSHA256IsRejected(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "feedback.db")
+	dbPath := filepath.Join(dir, "agentfeedback.db")
 	t.Setenv("DATABASE_PATH", dbPath)
 
 	for _, terminator := range []string{
@@ -518,7 +518,7 @@ func TestImport_TerminatorWithoutSHA256IsRejected(t *testing.T) {
 
 func TestImport_DeclaredHashMismatch(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "feedback.db")
+	dbPath := filepath.Join(dir, "agentfeedback.db")
 	t.Setenv("DATABASE_PATH", dbPath)
 
 	records := []string{
@@ -556,7 +556,7 @@ func TestImport_KeyedRecordWithoutRunIDIsRejected(t *testing.T) {
 	for _, family := range []string{"review", "event"} {
 		t.Run(family, func(t *testing.T) {
 			dir := t.TempDir()
-			dbPath := filepath.Join(dir, "feedback.db")
+			dbPath := filepath.Join(dir, "agentfeedback.db")
 			t.Setenv("DATABASE_PATH", dbPath)
 
 			records := []string{fmt.Sprintf(
@@ -576,7 +576,7 @@ func TestImport_KeyedRecordWithoutRunIDIsRejected(t *testing.T) {
 
 func TestImport_FamilyFilter(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "feedback.db")
+	dbPath := filepath.Join(dir, "agentfeedback.db")
 	t.Setenv("DATABASE_PATH", dbPath)
 
 	records := []string{
@@ -640,7 +640,7 @@ func TestImport_FamilyFilter(t *testing.T) {
 	// The digest still covers the whole stream, skipped records included: a
 	// filtered import of a tampered stream is refused.
 	dir2 := t.TempDir()
-	t.Setenv("DATABASE_PATH", filepath.Join(dir2, "feedback.db"))
+	t.Setenv("DATABASE_PATH", filepath.Join(dir2, "agentfeedback.db"))
 	tampered := writeExportFile(t, dir2, v1Header, records, true, strings.Repeat("0", 64))
 	if err := runImport([]string{"--family", "friction", tampered}); err == nil ||
 		!strings.Contains(err.Error(), "digest mismatch") {
@@ -664,7 +664,7 @@ func decodeSummary(t *testing.T, out string) importSummary {
 // database empty: the importer inserts as it reads, inside one transaction.
 func TestImport_RollbackOnCorruptLineLateInStream(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "feedback.db")
+	dbPath := filepath.Join(dir, "agentfeedback.db")
 	t.Setenv("DATABASE_PATH", dbPath)
 
 	records := make([]string, 0, 5000)
@@ -691,7 +691,7 @@ func TestImport_RollbackOnCorruptLineLateInStream(t *testing.T) {
 // can match, and replaying the same review would insert a second row.
 func TestImport_TrimsIdentifiers(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "feedback.db")
+	dbPath := filepath.Join(dir, "agentfeedback.db")
 	t.Setenv("DATABASE_PATH", dbPath)
 
 	records := []string{

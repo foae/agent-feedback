@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/foae/agent-feedback/internal/canonjson"
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/canonjson"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 // Generous upper bounds. They keep indexed columns small and stop garbage rows

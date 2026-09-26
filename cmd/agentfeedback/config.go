@@ -45,7 +45,7 @@ func envDurationOr(key string, fallback time.Duration) (time.Duration, error) {
 func loadConfig(requireAPIKey bool) (config, error) {
 	cfg := config{
 		APIKey:         os.Getenv("API_KEY"),
-		DatabasePath:   envOr("DATABASE_PATH", "/data/feedback.db"),
+		DatabasePath:   envOr("DATABASE_PATH", "/data/agentfeedback.db"),
 		HTTPListenAddr: envOr("HTTP_LISTEN_ADDR", "0.0.0.0:8080"),
 		ServiceVersion: envOr("SERVICE_VERSION", defaultServiceVersion),
 		LogLevel:       envOr("LOG_LEVEL", "info"),

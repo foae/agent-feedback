@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 func intPtr(v int) *int { return &v }
@@ -19,7 +19,7 @@ func intPtr(v int) *int { return &v }
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "feedback.db"))
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "agentfeedback.db"))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}

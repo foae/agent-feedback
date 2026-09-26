@@ -1,4 +1,4 @@
-// Command feedback serves the agent-feedback API and provides the offline
+// Command agentfeedback serves the AgentFeedback API and provides the offline
 // maintenance subcommands (import, backup) that operate on the same database.
 package main
 
@@ -14,18 +14,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/foae/agent-feedback/internal/api"
-	"github.com/foae/agent-feedback/internal/core"
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/api"
+	"github.com/agentfeedback/agentfeedback/internal/core"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 // defaultServiceVersion is overridden by SERVICE_VERSION.
-const defaultServiceVersion = "v2.2.1"
+const defaultServiceVersion = "v3.0.0"
 
 const usage = `usage:
-  feedback [serve]              serve the HTTP API (default)
-  feedback import <file.jsonl>  import an export stream into the database
-  feedback backup <dest.db>     write a consistent copy of the database
+  agentfeedback [serve]              serve the HTTP API (default)
+  agentfeedback import <file.jsonl>  import an export stream into the database
+  agentfeedback backup <dest.db>     write a consistent copy of the database
 
 environment: API_KEY (serve only), DATABASE_PATH, HTTP_LISTEN_ADDR,
 GRACEFUL_SHUTDOWN_TIMEOUT, SERVICE_VERSION, LOG_LEVEL
@@ -57,7 +57,7 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "feedback %s: %v\n", command, err)
+		fmt.Fprintf(os.Stderr, "agentfeedback %s: %v\n", command, err)
 		os.Exit(1)
 	}
 }
@@ -147,7 +147,7 @@ func runServe() error {
 
 func runBackup(args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: feedback backup <dest.db>")
+		return errors.New("usage: agentfeedback backup <dest.db>")
 	}
 	dest := args[0]
 

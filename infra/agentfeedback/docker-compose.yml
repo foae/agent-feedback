@@ -1,21 +1,21 @@
 # Local stack: one service, one volume. The database is a file on the
-# feedback-data volume; there is nothing else to run.
+# agentfeedback-data volume; there is nothing else to run.
 services:
-  feedback:
+  agentfeedback:
     build:
       context: ../..
       dockerfile: Dockerfile
     restart: unless-stopped
     stop_grace_period: 45s
     ports:
-      # Loopback is the safe default. Set FEEDBACK_BIND_ADDRESS=0.0.0.0 only
+      # Loopback is the safe default. Set AGENTFEEDBACK_BIND_ADDRESS=0.0.0.0 only
       # when a deliberately configured reverse proxy or firewall fronts it.
-      - "${FEEDBACK_BIND_ADDRESS:-127.0.0.1}:8090:8080"
+      - "${AGENTFEEDBACK_BIND_ADDRESS:-127.0.0.1}:8090:8080"
     environment:
       API_KEY: ${API_KEY:?Set API_KEY in .env}
-      DATABASE_PATH: /data/feedback.db
+      DATABASE_PATH: /data/agentfeedback.db
     volumes:
-      - feedback-data:/data
+      - agentfeedback-data:/data
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/ready >/dev/null"]
       interval: 5s
@@ -24,4 +24,4 @@ services:
       start_period: 10s
 
 volumes:
-  feedback-data:
+  agentfeedback-data:

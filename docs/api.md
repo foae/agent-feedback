@@ -1,8 +1,8 @@
-# agent-feedback HTTP API
+# AgentFeedback HTTP API
 
 The contract producers and processors integrate against. Self-contained: read
 this, then write the calls. Prefer the shipped client scripts in
-[`skills/agent-feedback/`](../skills/agent-feedback/SKILL.md); they implement
+[`skills/agentfeedback/`](../skills/agentfeedback/SKILL.md); they implement
 spooling, retries, receipt validation and outcome reporting. Hand-roll HTTP
 only for a producer the client does not cover.
 
@@ -149,7 +149,7 @@ curl -sS -X POST "$AGENT_FEEDBACK_URL/api/v1/frictions" \
 
 One record per completed multi-reviewer run: per-reviewer status, timing and
 grading. The client builds this from a run directory; see the
-[run-directory contract](../skills/agent-feedback/SKILL.md#run-directory-contract).
+[run-directory contract](../skills/agentfeedback/SKILL.md#run-directory-contract).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -189,7 +189,7 @@ under the same `(kind, key)`, `400 create_event_failed` on validation failure.
 curl -sS -X POST "$AGENT_FEEDBACK_URL/api/v1/events" \
   -H "X-Api-Key: $AGENT_FEEDBACK_API_KEY" -H 'Content-Type: application/json' \
   -d '{"kind":"deploy","key":"workstation-a-20260917-200648","machine_name":"workstation-a",
-       "coordinator_model":"claude-fable-5-1","payload":{"service":"agent-feedback","image":"sha-0e840b2","ok":true}}'
+       "coordinator_model":"claude-fable-5-1","payload":{"service":"agentfeedback","image":"sha-0e840b2","ok":true}}'
 ```
 
 ## Read endpoints
@@ -272,10 +272,10 @@ in one consistent read transaction:
 A stream without the terminator, or whose record count or digest disagrees
 with it, is damaged; do not restore from it. Optional filters: `family`,
 `since`. Unfiltered exports are the logical backup and migration format; the
-`feedback import` command verifies the header, count and digest, refuses
+`agentfeedback import` command verifies the header, count and digest, refuses
 filtered exports unless told otherwise, and preserves ids, timestamps, hashes
 and processing state (see [operate.md](operate.md#restore-and-migration)).
-For a physical backup of the live database use `feedback backup`.
+For a physical backup of the live database use `agentfeedback backup`.
 
 ## Processing
 

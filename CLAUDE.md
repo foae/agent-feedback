@@ -1,14 +1,14 @@
-# agent-feedback: working in this repo
+# AgentFeedback: working in this repo
 
 Go + SQLite HTTP service that stores write-once feedback from AI coding agents
-(frictions, review runs, events) plus two skills: `agent-feedback`
-(submit/read, Bash, installed everywhere) and `agent-feedback-triage` (process
+(frictions, review runs, events) plus two skills: `agentfeedback`
+(submit/read, Bash, installed everywhere) and `agentfeedback-triage` (process
 the queue, Bash plus an optional Python helper; user-invoked only).
 `AGENTS.md` is a symlink to this file: edit this one.
 
 This file is for agents **changing this repo**. If you only want to **use the
 running service**, you need one document: the skill's
-[`SKILL.md`](skills/agent-feedback/SKILL.md), or [`docs/api.md`](docs/api.md)
+[`SKILL.md`](skills/agentfeedback/SKILL.md), or [`docs/api.md`](docs/api.md)
 for raw HTTP.
 
 ## Route by task

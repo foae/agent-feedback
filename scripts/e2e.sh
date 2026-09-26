@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of agent-feedback. Run against a compose deployment; creates
+# End-to-end test of AgentFeedback. Run against a compose deployment; creates
 # test submissions in the service's database — clean up via `docker compose
 # down -v` or by deleting the rows afterward. Safe to rerun against a
 # persistent database: every run uses unique run_ids and unique friction content.
@@ -41,7 +41,7 @@ REVIEW=$(cat <<EOF
   "reviewers":[
     {"slot":"gpt56","model":"openai-codex/gpt-5.6-sol","status":"completed","duration_s":354,"bytes":2392,
      "output":"# review\nfindings...","score":5,"valid":2,"invalid":0,"note":"e2e note"},
-    {"slot":"kimi","model":"telnyx/moonshotai/Kimi-K3","status":"timeout","duration_s":900,"bytes":0}
+    {"slot":"model-x","model":"example/model-x","status":"timeout","duration_s":900,"bytes":0}
   ]}
 EOF
 )
@@ -79,7 +79,7 @@ chk "run_id over 200 bytes -> 400" 400 "$s" "$(jq -r 'if (.message|test("run_id"
 FRICTION=$(cat <<EOF
 {
   "machine_name":"e2e-test","coordinator_model":"claude-fable-5","category":"documentation",
-  "summary":"e2e friction $RUN","suggested_fix":"e2e fix","project":"agent-feedback","harness":"claude-code"}
+  "summary":"e2e friction $RUN","suggested_fix":"e2e fix","project":"agentfeedback","harness":"claude-code"}
 EOF
 )
 
@@ -209,7 +209,7 @@ chk "record carries family + payload_hash" 200 "$s" \
 
 EVENT=$(cat <<EOF
 {"kind":"deploy","key":"$RUN-deploy","machine_name":"e2e-test","coordinator_model":"claude-fable-5",
- "payload":{"service":"agent-feedback","image":"sha-e2e","ok":true,"attempts":2}}
+ "payload":{"service":"agentfeedback","image":"sha-e2e","ok":true,"attempts":2}}
 EOF
 )
 
@@ -221,7 +221,7 @@ chk "POST event -> 201" 201 "$s" \
 
 # 31 identical event replay (different key order) -> 200 same id
 s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
-  -d "$(jq -c '.payload={"ok":true,"attempts":2,"image":"sha-e2e","service":"agent-feedback"}' <<<"$EVENT")" $BASE/api/v1/events)
+  -d "$(jq -c '.payload={"ok":true,"attempts":2,"image":"sha-e2e","service":"agentfeedback"}' <<<"$EVENT")" $BASE/api/v1/events)
 chk "replay event -> 200 same id" 200 "$s" "$(jq -r --argjson eid "$eid" 'if .id==$eid then 1 else 0 end' "$BODY")"
 
 # 32 different event content under the same key -> 409
@@ -264,17 +264,17 @@ chk "include=payload returns payloads" 200 "$s" \
 
 # 39 processed with a resolution -> updated, resolution echoed and stored
 s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
-  -d "{\"ids\":[$fid2],\"resolution\":\"fixed in agent-feedback@e2e\"}" $BASE/api/v1/submissions/processed)
+  -d "{\"ids\":[$fid2],\"resolution\":\"fixed in agentfeedback@e2e\"}" $BASE/api/v1/submissions/processed)
 chk "mark with resolution -> updated" 200 "$s" \
-  "$(jq -r --argjson fid2 "$fid2" 'if (.updated|index($fid2))!=null and .resolution=="fixed in agent-feedback@e2e" then 1 else 0 end' "$BODY")"
+  "$(jq -r --argjson fid2 "$fid2" 'if (.updated|index($fid2))!=null and .resolution=="fixed in agentfeedback@e2e" then 1 else 0 end' "$BODY")"
 s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions/$fid2")
 stamp=$(jq -r .processed_at "$BODY")
 chk "resolution stored on the record" 200 "$s" \
-  "$(jq -r 'if .resolution=="fixed in agent-feedback@e2e" and .processed_at!=null then 1 else 0 end' "$BODY")"
+  "$(jq -r 'if .resolution=="fixed in agentfeedback@e2e" and .processed_at!=null then 1 else 0 end' "$BODY")"
 
 # 40 same resolution again -> unchanged
 s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
-  -d "{\"ids\":[$fid2],\"resolution\":\"fixed in agent-feedback@e2e\"}" $BASE/api/v1/submissions/processed)
+  -d "{\"ids\":[$fid2],\"resolution\":\"fixed in agentfeedback@e2e\"}" $BASE/api/v1/submissions/processed)
 chk "same resolution -> unchanged" 200 "$s" \
   "$(jq -r --argjson fid2 "$fid2" 'if (.unchanged|index($fid2))!=null and (.updated|length)==0 then 1 else 0 end' "$BODY")"
 
@@ -283,7 +283,7 @@ s=$(req -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
   -d "{\"ids\":[$fid2],\"resolution\":\"duplicate of $fid\"}" $BASE/api/v1/submissions/processed)
 ok1=$(jq -r --argjson fid2 "$fid2" 'if (.updated|index($fid2))!=null then 1 else 0 end' "$BODY")
 s=$(req -H "X-Api-Key: $KEY" "$BASE/api/v1/submissions/$fid2")
-ok2=$(jq -r --arg stamp "$stamp" 'if .resolution!="fixed in agent-feedback@e2e" and .processed_at==$stamp then 1 else 0 end' "$BODY")
+ok2=$(jq -r --arg stamp "$stamp" 'if .resolution!="fixed in agentfeedback@e2e" and .processed_at==$stamp then 1 else 0 end' "$BODY")
 chk "new resolution replaces, keeps processed_at" 200 "$s" "$((ok1 * ok2))"
 
 # 42 blank resolution -> 400 ; resolution with processed=false -> 400

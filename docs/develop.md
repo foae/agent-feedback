@@ -1,4 +1,4 @@
-# Develop agent-feedback
+# Develop AgentFeedback
 
 How to change the service and the skills, verify, and release. Read
 [api.md](api.md) first if the change touches the HTTP surface.
@@ -6,19 +6,18 @@ How to change the service and the skills, verify, and release. Read
 ## Layout
 
 ```
-cmd/feedback/                   main: `serve` (default), `import <jsonl>`, `backup <dest.db>`
+cmd/agentfeedback/              main: `serve` (default), `import <jsonl>`, `backup <dest.db>`
 internal/api/                   HTTP: mux, middleware (auth, recovery, request id, log, metrics, body limits), handlers, DTOs
 internal/core/                  validation, per-family canonical hashing, create/list/get/processed/export
 internal/store/                 SQLite: open + pragmas, embedded forward-only migrations, hand-written SQL
 internal/canonjson/             canonical JSON for event hashing
-infra/agent-feedback/           compose stacks (local build, image-based deploy) and .env.example
-scripts/                        e2e.sh (live contract suite), deploy.sh, export-v1-postgres.sh, release.py,
+infra/agentfeedback/            compose stacks (local build, image-based deploy) and .env.example
+scripts/                        e2e.sh (live contract suite), deploy.sh, release.py,
                                 eval-cluster.py (live cluster.py calibration; discloses report text)
-skills/agent-feedback/          submit/query/process client skill (copied as-is into a harness; no tests inside)
-skills/agent-feedback-triage/   processor skill (SKILL.md, digest.sh; optional cluster.py + reference/clustering.md)
+skills/agentfeedback/           submit/query/process client skill (copied as-is into a harness; no tests inside)
+skills/agentfeedback-triage/    processor skill (SKILL.md, digest.sh; optional cluster.py + reference/clustering.md)
 tests/skill/                    hermetic tests for both skills' scripts (mock server, isolated HOME)
-docs/                           api.md (contract), operate.md, develop.md, security.md, releases.md,
-                                agent-usage.md (redirect for API 1.0 links)
+docs/                           api.md (contract), operate.md, develop.md, security.md, releases.md
 ```
 
 Go toolchain and module versions are pinned in `go.mod`. Tools: `just`,
@@ -29,7 +28,7 @@ Go toolchain and module versions are pinned in `go.mod`. Tools: `just`,
 ```bash
 just check          # gofmt, go vet, go mod tidy, build — the pre-commit gate
 just test           # go test -race -count=1 ./...  (SQLite on temp files; no services needed)
-just run-local      # serve on 127.0.0.1:8090 with a temp database
+just run-local      # serve on 127.0.0.1:8090 with a database in ./local/
 bash scripts/e2e.sh <API_KEY> [BASE_URL]      # live contract suite against a running service
 bash tests/skill/run-tests.sh                 # hermetic client tests (mock server, needs python3)
 shellcheck -x -P SCRIPTDIR skills/*/scripts/*.sh tests/skill/run-tests.sh
@@ -40,7 +39,7 @@ python3 scripts/eval-cluster.py <export.ndjson> <labels.json> --allow-repo <remo
 
 - **An API change is a five-artifact change**, in one commit: `internal/`
   code, [api.md](api.md), `scripts/e2e.sh`, the client scripts in
-  `skills/agent-feedback/scripts/`, and `tests/skill/`. Producers build their
+  `skills/agentfeedback/scripts/`, and `tests/skill/`. Producers build their
   calls from api.md without reading the code.
 - **Write-once payloads.** Only `processed_at` and `resolution` ever change
   after insert. Never add an update path for content; a correction is a new
@@ -65,7 +64,7 @@ python3 scripts/eval-cluster.py <export.ndjson> <labels.json> --allow-repo <remo
 - **Clustering changes are measured.** Changing `cluster.py`'s instructions,
   criteria, threshold or batching means rerunning `scripts/eval-cluster.py`
   and updating the calibration section of
-  `skills/agent-feedback-triage/reference/clustering.md` (the one dated
+  `skills/agentfeedback-triage/reference/clustering.md` (the one dated
   statement a skill carries). Ship a prompt change only when the eval
   supports it. The eval discloses report text: it needs the queue owner's
   approval for every exact remote (`--allow-repo`), and without `--live` it
@@ -87,7 +86,7 @@ python3 scripts/eval-cluster.py <export.ndjson> <labels.json> --allow-repo <remo
 5. Docs touched: every relative link resolves.
 
 CI runs the same gates and, on `main`, publishes the image as
-`ghcr.io/foae/agent-feedback:<sha>` and `:latest`.
+`ghcr.io/agentfeedback/agentfeedback:<sha>` and `:latest`.
 
 ## Release
 

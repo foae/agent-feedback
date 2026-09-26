@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/foae/agent-feedback/internal/core"
+	"github.com/agentfeedback/agentfeedback/internal/core"
 )
 
 // ErrorResponse is the standard error body.

@@ -10,7 +10,7 @@ import (
 func TestOpenAppliesSchemaAndIsIdempotent(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "feedback.db")
+	path := filepath.Join(t.TempDir(), "agentfeedback.db")
 	ctx := context.Background()
 
 	db, err := Open(ctx, path)
@@ -47,7 +47,7 @@ func TestOpenAppliesSchemaAndIsIdempotent(t *testing.T) {
 func TestOpenRefusesNewerSchema(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "feedback.db")
+	path := filepath.Join(t.TempDir(), "agentfeedback.db")
 	ctx := context.Background()
 
 	db, err := Open(ctx, path)
@@ -76,7 +76,7 @@ func TestSetSequenceNeverLowersTheCounter(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	db, err := Open(ctx, filepath.Join(t.TempDir(), "feedback.db"))
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "agentfeedback.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

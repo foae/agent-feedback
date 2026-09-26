@@ -6,7 +6,7 @@ Source releases are annotated, immutable `vMAJOR.MINOR.PATCH` tags: patch for
 compatible fixes, docs and dependency updates; minor for compatible features;
 major for breaking API or operational contracts. Every delivered change belongs
 to a release. The two skills carry their own `version` in their `SKILL.md`;
-bump one only when its command contract changes. For `agent-feedback`, bump
+bump one only when its command contract changes. For `agentfeedback`, bump
 `AF_CLIENT_VERSION` in `scripts/_common.sh` and its pin in
 `tests/skill/run-tests.sh` with it: that value is what payloads report.
 
@@ -14,7 +14,7 @@ Maintainers need Git, Python 3 and an authenticated GitHub CLI (`gh`) with
 write access to the repository and its tags.
 
 1. Update the stable version link in `README.md`, the `SERVICE_VERSION`
-   default in `cmd/feedback/main.go` and in the root `.env.example`, and add
+   default in `cmd/agentfeedback/main.go` and in the root `.env.example`, and add
    notes to this file.
 2. Run the gates in [develop.md](develop.md#verification-before-you-are-done),
    commit, push `main`, and let CI finish on that exact commit (it publishes
@@ -47,6 +47,45 @@ that version. Rewrite the section's relative links to repo-root paths
 (`api.md` to `docs/api.md`) — a release body resolves them against the
 repository root, not `docs/`. Corrections to source
 need a new version; corrections to release prose need no new tag.
+
+## v3.0.0 — AgentFeedback: new home, new names, fresh start
+
+The project moved to [github.com/AgentFeedback/agentfeedback](https://github.com/AgentFeedback/agentfeedback)
+and is the open-source, self-hostable AgentFeedback
+([agentfeedback.dev](https://agentfeedback.dev)); a hosted version with the
+same API runs at [agentfeedback.io](https://agentfeedback.io). Every name
+changes; v3 is a fresh install with no automatic migration from 2.x. The HTTP API
+(1.1), payloads and hash forms are unchanged.
+
+- **Skills** `agent-feedback` → `agentfeedback` 4.0 and
+  `agent-feedback-triage` → `agentfeedback-triage` 3.0: new directory and
+  invocation names (`/agentfeedback-triage`). Remove the old copies and
+  update anything that calls `skills/agent-feedback/scripts/…`. Before
+  removing an old copy, send its spool with it (`query.sh --flush`): the
+  new client does not read `~/.cache/agent-feedback`. Client
+  environment variables keep their names (`AGENT_FEEDBACK_*`); the spool
+  moves to `~/.cache/agentfeedback` and triage digests to
+  `${TMPDIR:-/tmp}/agentfeedback-triage/`. The skills work against a
+  self-hosted service or `https://api.agentfeedback.io`.
+- **Service**: Go module `github.com/agentfeedback/agentfeedback`; binary
+  `agentfeedback` (`cmd/agentfeedback`, `/opt/agentfeedback`, runs as user
+  `agentfeedback`); image `ghcr.io/agentfeedback/agentfeedback`; default
+  database `/data/agentfeedback.db`; metrics renamed `agentfeedback_*`
+  (`agentfeedback_submissions_unprocessed`, `agentfeedback_db_bytes`,
+  `agentfeedback_sqlite_busy_total`).
+- **Deploy**: stack directory `infra/agentfeedback`, compose service
+  `agentfeedback`, volume `agentfeedback-data`, server directory
+  `~/agentfeedback`, variables `AGENTFEEDBACK_IMAGE` and
+  `AGENTFEEDBACK_BIND_ADDRESS`. On a host running 2.x: export if you want
+  the data (`query.sh export`), then `docker compose down` in
+  `~/agent-feedback` (it holds port 8090), deploy v3, and import the export
+  into the empty database ([operate.md](operate.md#restore-and-migration)).
+  Remove the old stack with `docker compose down -v` in `~/agent-feedback`
+  once v3 is verified.
+- **Removed**: the 1.x PostgreSQL export script and migration and uninstall
+  docs, and the `docs/agent-usage.md` redirect. A 1.x deployment migrates
+  with the script and procedure from v2.2.1 first.
+- CI lowercases the image name (the org name has capitals).
 
 ## v2.2.1 — Documentation sweep
 

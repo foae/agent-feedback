@@ -7,15 +7,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/foae/agent-feedback/internal/core"
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/core"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 // A backup must be a usable database, not just a file: the copy is opened and
 // its rows counted.
 func TestBackup_CopyIsAReadableDatabase(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "feedback.db")
+	dbPath := filepath.Join(dir, "agentfeedback.db")
 	t.Setenv("DATABASE_PATH", dbPath)
 
 	ctx := context.Background()

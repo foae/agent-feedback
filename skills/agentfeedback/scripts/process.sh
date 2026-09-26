@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Process agent-feedback submissions from any machine: list what's unprocessed,
+# Process AgentFeedback submissions from any machine: list what's unprocessed,
 # mark submissions processed (with what was done) after acting on them, undo
 # mistakes.
 #

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Read submissions back from the agent-feedback service. Raw JSON on stdout —
+# Read submissions back from the AgentFeedback service. Raw JSON on stdout —
 # pipe to jq. READ-ONLY by default: does not touch the write spool unless
 # --flush is passed.
 #

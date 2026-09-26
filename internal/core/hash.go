@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/foae/agent-feedback/internal/canonjson"
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/canonjson"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 // reviewCanonical / frictionCanonical are the exact shapes hashed into

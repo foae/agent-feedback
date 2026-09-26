@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/foae/agent-feedback/internal/core"
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/core"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 const testAPIKey = "test-key"
@@ -20,7 +20,7 @@ const testAPIKey = "test-key"
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "feedback.db"))
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "agentfeedback.db"))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestRouter_OperationalEndpoints(t *testing.T) {
 		t.Fatalf("GET /metrics: status %d", status)
 	}
 	for _, metric := range []string{
-		"http_requests_total", "feedback_submissions_unprocessed", "feedback_db_bytes", "feedback_sqlite_busy_total",
+		"http_requests_total", "agentfeedback_submissions_unprocessed", "agentfeedback_db_bytes", "agentfeedback_sqlite_busy_total",
 	} {
 		if !strings.Contains(string(body), metric) {
 			t.Fatalf("metrics output is missing %s", metric)

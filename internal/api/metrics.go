@@ -8,7 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/foae/agent-feedback/internal/core"
+	"github.com/agentfeedback/agentfeedback/internal/core"
 )
 
 // Outcomes recorded on submissions_created_total.
@@ -89,13 +89,13 @@ type stateCollector struct {
 
 var (
 	unprocessedDesc = prometheus.NewDesc(
-		"feedback_submissions_unprocessed",
+		"agentfeedback_submissions_unprocessed",
 		"Submissions awaiting processing (processed_at IS NULL).", nil, nil)
 	dbBytesDesc = prometheus.NewDesc(
-		"feedback_db_bytes",
+		"agentfeedback_db_bytes",
 		"Size in bytes of the SQLite database file plus its write-ahead log.", nil, nil)
 	busyDesc = prometheus.NewDesc(
-		"feedback_sqlite_busy_total",
+		"agentfeedback_sqlite_busy_total",
 		"Write transactions that failed because the database stayed locked past the busy timeout.", nil, nil)
 )
 

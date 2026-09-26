@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scriptable mock of the agent-feedback service (API 1.1) for hermetic client tests.
+"""Scriptable mock of the AgentFeedback service (API 1.1) for hermetic client tests.
 
 Usage: mock_server.py <state_dir>
 

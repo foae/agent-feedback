@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the agent-feedback skill scripts. SOURCED, not executed.
+# Shared helpers for the AgentFeedback skill scripts. SOURCED, not executed.
 #
 # Env contract (endpoint and key are operator-managed):
 #   AGENT_FEEDBACK_URL         required for every /api/v1/* call; no default
@@ -15,7 +15,7 @@
 # The overrides make attribution exact from ANY harness: set them in the
 # harness's profile/hook and detection below never matters.
 #
-# Spool: ~/.cache/agent-feedback/spool/ — one JSON payload per file.
+# Spool: ~/.cache/agentfeedback/spool/ — one JSON payload per file.
 #   review-*    retry-safe for 30d: the API is idempotent on (skill, run_id)
 #               and rejects changed content with 409, so replays never corrupt.
 #   event-*     retry-safe for 30d: idempotent on (kind, key), same rules.
@@ -30,12 +30,12 @@
 
 AF_URL="${AGENT_FEEDBACK_URL:-}"
 AF_KEY="${AGENT_FEEDBACK_API_KEY:-}"
-AF_CACHE="$HOME/.cache/agent-feedback"
+AF_CACHE="$HOME/.cache/agentfeedback"
 AF_SPOOL="$AF_CACHE/spool"
 AF_REVIEW_MAX_AGE_DAYS=30
 AF_FRICTION_MAX_AGE_MINS=1200   # 20h — safely inside the server's 24h dedupe window
 AF_REJECTED_MAX_AGE_DAYS=30
-AF_CLIENT_VERSION="3.0"
+AF_CLIENT_VERSION="4.0"
 
 # Server-side limits, enforced locally too so a rejection costs no round trip
 # and --dry-run means the same thing the server would say.
@@ -50,7 +50,7 @@ AF_MAX_BODY_BYTES=10485760   # 10 MiB — the server's request-body cap (413)
 
 af_machine() { printf '%s' "${AGENT_FEEDBACK_MACHINE:-$(hostname -s)}"; }
 
-af_warn() { echo "agent-feedback: $*" >&2; }
+af_warn() { echo "agentfeedback: $*" >&2; }
 
 # af_json_string <text> — JSON string literal without jq (af_die must still
 # produce a machine-readable outcome when jq itself is what is missing).
@@ -158,7 +158,7 @@ af_check_context() {
 af_auth_header_file() {
   local header
   af_validate_api_key
-  header=$(mktemp "${TMPDIR:-/tmp}/agent-feedback-header.XXXXXX") \
+  header=$(mktemp "${TMPDIR:-/tmp}/agentfeedback-header.XXXXXX") \
     || af_die "could not create protected curl header file"
   chmod 600 "$header" \
     || { rm -f "$header"; af_die "could not protect curl header file"; }

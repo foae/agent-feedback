@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/foae/agent-feedback/internal/core"
+	"github.com/agentfeedback/agentfeedback/internal/core"
 )
 
 // handleListSubmissions handles GET /api/v1/submissions.

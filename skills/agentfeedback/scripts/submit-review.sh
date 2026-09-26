@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Submit a completed multi-reviewer run to the agent-feedback service —
+# Submit a completed multi-reviewer run to the AgentFeedback service —
 # timings + scorecard by default, raw outputs only with --include-outputs.
 #
 # Usage:

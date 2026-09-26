@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 // Sentinel errors. The API layer maps these to status codes.

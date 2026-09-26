@@ -1,6 +1,6 @@
 # Security
 
-agent-feedback is a single-trust-domain service for one team's machines. It
+AgentFeedback is a single-trust-domain service for one team's machines. It
 is not multi-tenant and is not safe to expose directly to the internet.
 
 ## Access and network
@@ -9,12 +9,12 @@ is not multi-tenant and is not safe to expose directly to the internet.
   mark. No per-user permissions, no revocation of a single client, no overlap
   window on rotation (procedure in [operate.md](operate.md#key-rotation)).
 - HTTP is plaintext. The compose stacks bind `127.0.0.1:8090`. Set
-  `FEEDBACK_BIND_ADDRESS=0.0.0.0` only inside a trusted private network or
+  `AGENTFEEDBACK_BIND_ADDRESS=0.0.0.0` only inside a trusted private network or
   behind a reverse proxy that terminates TLS and authenticates.
 - `/health`, `/ready` and `/metrics` need no key; keep them inside the
   deployment boundary. There is no rate limiting; the only server-side bound
   is the 10 MiB body cap.
-- Keep `infra/agent-feedback/.env`, the remote `.env`, backups and every
+- Keep `infra/agentfeedback/.env`, the remote `.env`, backups and every
   producer's `AGENT_FEEDBACK_API_KEY` private. `.env` and `.private/` are
   gitignored; never force-add them.
 
@@ -41,7 +41,7 @@ authorize edits or processed marks. A batched request shares one state
 among up to 8 reports, all from approved repositories. `scripts/eval-cluster.py`
 is the same boundary for calibration: it sends nothing unless every labelled
 report's exact remote is approved and `--live` is given. The
-[clustering reference](../skills/agent-feedback-triage/reference/clustering.md)
+[clustering reference](../skills/agentfeedback-triage/reference/clustering.md)
 defines the fields, consent rules and manual fallback.
 
 ## Data at rest
@@ -50,7 +50,7 @@ One SQLite file in a Docker volume, readable by anyone who can read the
 volume or a backup. Encrypt and restrict backups; they hold everything
 agents ever reported. Retention is manual (see
 [operate.md](operate.md#retention)). Producers keep unsent payloads in
-`~/.cache/agent-feedback/spool/` until delivered or aged out.
+`~/.cache/agentfeedback/spool/` until delivered or aged out.
 
 ## Reporting a vulnerability
 

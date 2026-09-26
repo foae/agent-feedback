@@ -1,4 +1,4 @@
-module github.com/foae/agent-feedback
+module github.com/agentfeedback/agentfeedback
 
 go 1.27.0
 

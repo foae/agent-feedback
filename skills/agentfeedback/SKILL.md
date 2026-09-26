@@ -1,22 +1,22 @@
 ---
-name: agent-feedback
-description: Report friction (what slowed you down) and other write-once telemetry to a self-hosted agent-feedback service, and read the queue back. Use when your instructions tell you to surface or submit friction, when you need to record a review run or a generic event, or when you need to list, inspect or mark processed submissions. Processing the queue end to end is the sibling agent-feedback-triage skill, which only the user invokes.
+name: agentfeedback
+description: Report friction (what slowed you down) and other write-once telemetry to an AgentFeedback service (self-hosted or agentfeedback.io), and read the queue back. Use when your instructions tell you to surface or submit friction, when you need to record a review run or a generic event, or when you need to list, inspect or mark processed submissions. Processing the queue end to end is the sibling agentfeedback-triage skill, which only the user invokes.
 license: MIT
 compatibility: Any harness that can run bash. Requires curl and jq (and sha256sum or shasum for query.sh export), plus AGENT_FEEDBACK_URL and AGENT_FEEDBACK_API_KEY in the environment.
 metadata:
-  author: foae
-  version: "3.0"
+  author: AgentFeedback
+  version: "4.0"
 ---
 
-# agent-feedback
+# AgentFeedback
 
-Client for the agent-feedback service (a small Go + SQLite HTTP service; API
+Client for the AgentFeedback service (a small Go + SQLite HTTP service; API
 contract in the service repository's `docs/api.md`). This skill is one of two:
 
 | Skill | Role | Who runs it |
 |---|---|---|
-| **agent-feedback** (this) | submit and read | every agent, in every harness, as part of normal work |
-| [**agent-feedback-triage**](../agent-feedback-triage/SKILL.md) | process the queue | on demand, only when the user invokes it by name |
+| **agentfeedback** (this) | submit and read | every agent, in every harness, as part of normal work |
+| [**agentfeedback-triage**](../agentfeedback-triage/SKILL.md) | process the queue | on demand, only when the user invokes it by name |
 
 Three kinds of data, all write-once:
 
@@ -30,9 +30,12 @@ duplicates and replays itself.
 ## Install
 
 Copy this directory (`SKILL.md` + `scripts/`) into your harness's skills
-location, for example `~/.claude/skills/agent-feedback/`, or a shared skills
+location, for example `~/.claude/skills/agentfeedback/`, or a shared skills
 directory that several harnesses read. Nothing to build. Then set the
-environment, typically in a shell profile every harness inherits:
+environment, typically in a shell profile every harness inherits. The service
+is either one you run yourself or the hosted one: for agentfeedback.io set
+`AGENT_FEEDBACK_URL=https://api.agentfeedback.io` and use an API key issued
+there.
 
 ```
 AGENT_FEEDBACK_URL        required: your service endpoint, e.g. http://192.0.2.10:8090
@@ -45,7 +48,7 @@ AGENT_FEEDBACK_REVIEW_DIRS optional: colon-separated review run-directory roots 
 AGENT_FEEDBACK_TRIAGE_ROOTS optional, triage only: colon-separated directories holding local checkouts
 ```
 
-The sibling `agent-feedback-triage` skill installs the same way (the whole
+The sibling `agentfeedback-triage` skill installs the same way (the whole
 directory, including `reference/`), beside this one, and only where someone processes the queue. It runs only when the user
 invokes it (`disable-model-invocation: true`).
 
@@ -53,8 +56,8 @@ Check the install: `bash scripts/submit-friction.sh --category test --summary "i
 prints the payload and `{"status":"valid"}` without sending anything.
 
 Uninstall: flush or discard the spool (`bash scripts/query.sh --flush --limit 1`,
-or `rm -rf ~/.cache/agent-feedback`), delete this directory (and the sibling
-`agent-feedback-triage` if installed) from every harness's skills location, and
+or `rm -rf ~/.cache/agentfeedback`), delete this directory (and the sibling
+`agentfeedback-triage` if installed) from every harness's skills location, and
 remove the `AGENT_FEEDBACK_*` variables from shell profiles. Removing the
 service itself is described in the repository's `docs/operate.md`.
 
@@ -120,7 +123,7 @@ none when nothing qualifies. Relay outcomes to the user verbatim.
 | `{"status":"failed","reason":"spool_unwritable",…}` | could not send and could not save; the payload is printed to stderr for recovery | 1 |
 | `{"status":"error","message":"…"}` | configuration, transport or HTTP failure in a read or process command; nothing changed | 1 |
 
-Spool location: `~/.cache/agent-feedback/spool/` (owner-only). `spooled`
+Spool location: `~/.cache/agentfeedback/spool/` (owner-only). `spooled`
 means the payload file is written and renamed into place; a power loss in
 the same instant can still lose it, so a backlog warning plus the payload on
 stderr is the recovery path, not a durability guarantee. Frictions are
@@ -134,7 +137,7 @@ never print the API key, and send it via a mode-0600 header file, not argv.
 
 ## Process the queue
 
-Used by the agent-feedback-triage skill and by any session closing a row it fixed.
+Used by the agentfeedback-triage skill and by any session closing a row it fixed.
 
 ```bash
 bash scripts/process.sh list                          # every unprocessed row, all pages; TSV: id family type machine category-or-run_id summary
@@ -170,7 +173,7 @@ writing what it received.
 
 ```bash
 bash scripts/submit-event.sh --kind deploy --key "$(hostname -s)-$(date -u +%Y%m%d-%H%M%S)" --model claude-fable-5-1 --stdin <<'JSON'
-{"service":"agent-feedback","image":"sha-0e840b2","ok":true}
+{"service":"agentfeedback","image":"sha-0e840b2","ok":true}
 JSON
 ```
 

@@ -14,26 +14,26 @@ RUN go mod download
 COPY ./ ./
 
 RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
-    go build -trimpath -ldflags="-s -w" -o /opt/feedback ./cmd/feedback
+    go build -trimpath -ldflags="-s -w" -o /opt/agentfeedback ./cmd/agentfeedback
 
 # Alpine supplies the runtime curl used by the Compose readiness healthcheck,
 # CA roots, timezone data, and a non-root service account.
 FROM alpine:3.24.1
 
 RUN apk add --no-cache ca-certificates curl tzdata \
-    && addgroup -S -g 10001 feedback \
-    && adduser -S -u 10001 -G feedback feedback \
+    && addgroup -S -g 10001 agentfeedback \
+    && adduser -S -u 10001 -G agentfeedback agentfeedback \
     && mkdir -p /data \
-    && chown feedback:feedback /data
+    && chown agentfeedback:agentfeedback /data
 
-COPY --from=build /opt/feedback /opt/feedback
+COPY --from=build /opt/agentfeedback /opt/agentfeedback
 
 # The database lives on a volume. /data is owned by the service account so a
 # freshly created named volume (which inherits the image's ownership) is
 # writable without any host-side chown.
 VOLUME /data
-ENV DATABASE_PATH=/data/feedback.db
+ENV DATABASE_PATH=/data/agentfeedback.db
 
-USER feedback
+USER agentfeedback
 EXPOSE 8080
-ENTRYPOINT ["/opt/feedback"]
+ENTRYPOINT ["/opt/agentfeedback"]

@@ -15,8 +15,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/foae/agent-feedback/internal/core"
-	"github.com/foae/agent-feedback/internal/store"
+	"github.com/agentfeedback/agentfeedback/internal/core"
+	"github.com/agentfeedback/agentfeedback/internal/store"
 )
 
 // importRecord is one line of an export stream. Every nullable field is a
@@ -139,7 +139,7 @@ func runImport(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: feedback import [--allow-nonempty] [--allow-partial] [--trust-hashes] " +
+		return errors.New("usage: agentfeedback import [--allow-nonempty] [--allow-partial] [--trust-hashes] " +
 			"[--family friction|review|event] [--reserve-ids-through N] <file.jsonl>")
 	}
 	path := fs.Arg(0)
