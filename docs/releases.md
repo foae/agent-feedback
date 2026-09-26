@@ -54,17 +54,13 @@ The project moved to [github.com/AgentFeedback/agentfeedback](https://github.com
 and is the open-source, self-hostable AgentFeedback
 ([agentfeedback.dev](https://agentfeedback.dev)); a hosted version with the
 same API runs at [agentfeedback.io](https://agentfeedback.io). Every name
-changes; v3 is a fresh install with no automatic migration from 2.x. The HTTP API
-(1.1), payloads and hash forms are unchanged.
+changes and v3 is a fresh start: no migration from or compatibility with
+2.x deployments and skill installs. The HTTP API (1.1), payloads and hash forms are unchanged.
 
 - **Skills** `agent-feedback` → `agentfeedback` 4.0 and
   `agent-feedback-triage` → `agentfeedback-triage` 3.0: new directory and
-  invocation names (`/agentfeedback-triage`). Remove the old copies and
-  update anything that calls `skills/agent-feedback/scripts/…`. Before
-  removing an old copy, send its spool with it (`query.sh --flush`): the
-  new client does not read `~/.cache/agent-feedback`. Client
-  environment variables keep their names (`AGENT_FEEDBACK_*`); the spool
-  moves to `~/.cache/agentfeedback` and triage digests to
+  invocation names (`/agentfeedback-triage`). Client environment variables
+  keep their names (`AGENT_FEEDBACK_*`); the spool moves to `~/.cache/agentfeedback` and triage digests to
   `${TMPDIR:-/tmp}/agentfeedback-triage/`. The skills work against a
   self-hosted service or `https://api.agentfeedback.io`.
 - **Service**: Go module `github.com/agentfeedback/agentfeedback`; binary
@@ -76,15 +72,9 @@ changes; v3 is a fresh install with no automatic migration from 2.x. The HTTP AP
 - **Deploy**: stack directory `infra/agentfeedback`, compose service
   `agentfeedback`, volume `agentfeedback-data`, server directory
   `~/agentfeedback`, variables `AGENTFEEDBACK_IMAGE` and
-  `AGENTFEEDBACK_BIND_ADDRESS`. On a host running 2.x: export if you want
-  the data (`query.sh export`), then `docker compose down` in
-  `~/agent-feedback` (it holds port 8090), deploy v3, and import the export
-  into the empty database ([operate.md](operate.md#restore-and-migration)).
-  Remove the old stack with `docker compose down -v` in `~/agent-feedback`
-  once v3 is verified.
+  `AGENTFEEDBACK_BIND_ADDRESS`.
 - **Removed**: the 1.x PostgreSQL export script and migration and uninstall
-  docs, and the `docs/agent-usage.md` redirect. A 1.x deployment migrates
-  with the script and procedure from v2.2.1 first.
+  docs, and the `docs/agent-usage.md` redirect.
 - CI lowercases the image name (the org name has capitals).
 
 ## v2.2.1 — Documentation sweep

@@ -179,15 +179,12 @@ removing any service; the data is gone with the volume.
 
 ### Skills, on every machine that has them
 
-1. Find the installed copies (`agentfeedback`, `agentfeedback-triage`;
-   `agent-feedback` and `agent-feedback-triage` from before v3.0.0;
-   `feedback-triage` from before v2.2.0) in every harness skills directory you
+1. Find the installed copies (`agentfeedback`, `agentfeedback-triage`) in every harness skills directory you
    use, e.g. `ls -la ~/.claude/skills | grep feedback`. Entries may be symlinks into
    a shared checkout; remove the links, then the checkout if nothing else uses it.
 2. Flush or discard unsent payloads first: `bash <skill-dir>/scripts/query.sh --flush --limit 1`
    sends whatever is spooled; or delete `~/.cache/agentfeedback/` to drop it.
-3. Remove the directories or links, then `rm -rf ~/.cache/agentfeedback`
-   (and `~/.cache/agent-feedback` from before v3.0.0).
+3. Remove the directories or links, then `rm -rf ~/.cache/agentfeedback`.
 4. Remove `AGENT_FEEDBACK_URL`, `AGENT_FEEDBACK_API_KEY`, `AGENT_FEEDBACK_MACHINE`,
    `AGENT_FEEDBACK_MODEL`, `AGENT_FEEDBACK_HARNESS`, `AGENT_FEEDBACK_SESSION_ID`
    `AGENT_FEEDBACK_REVIEW_DIRS` and `AGENT_FEEDBACK_TRIAGE_ROOTS` (plus
